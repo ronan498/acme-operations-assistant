@@ -1,0 +1,108 @@
+name: acme-assistant
+
+# Data plane (postgres, redis, mcp-server) publishes NO host ports —
+# reachable only on the internal Compose network. Only api, keycloak,
+# and phoenix are exposed. The api's OpenAI call is the sole egress.
+
+services:
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-acme}:${POSTGRES_PASSWORD:-acme_dev_password}@postgres:5432/${POSTGRES_DB:-acme}
+      REDIS_URL: redis://redis:6379/0
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-master} # switches to 'acme' in Phase 2
+      MCP_SERVER_URL: http://mcp-server:8765/mcp
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      PRIMARY_MODEL: ${PRIMARY_MODEL:-gpt-5.6-sol}
+      FALLBACK_MODELS: ${FALLBACK_MODELS:-gpt-5.5,gpt-5.4}
+      PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      mcp-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  mcp-server:
+    build: ./mcp-server
+    # no ports — internal only
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-acme}:${POSTGRES_PASSWORD:-acme_dev_password}@postgres:5432/${POSTGRES_DB:-acme}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  postgres:
+    image: postgres:17-alpine
+    # no ports — internal only
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-acme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-acme_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-acme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-acme} -d ${POSTGRES_DB:-acme}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    # no ports — internal only
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.1
+    command: ["start-dev"] # dev mode is a documented local-scope trade-off; --import-realm added in Phase 2
+    ports:
+      - "8080:8080"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+    healthcheck:
+      # keycloak image has no curl/wget; bash /dev/tcp against the management port
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '\"status\": \"UP\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  phoenix:
+    image: arizephoenix/phoenix:version-20.2.0
+    ports:
+      - "6006:6006" # trace UI + OTLP http
+    healthcheck:
+      # exec form — the phoenix image ships no shell, so CMD-SHELL can never pass
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:6006/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+volumes:
+  pgdata:

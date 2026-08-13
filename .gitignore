@@ -1,0 +1,22 @@
+# Secrets — never committed; .env.example is the committed template
+.env
+.env.*
+!.env.example
+
+# Internal planning docs — not part of the submitted deliverables
+PLAN.md
+
+# EY's brief — §7 says don't share it, so it never enters the repo
+FDE_Case Study_Candidate Pack.docx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Frontend (Phase 5b)
+node_modules/
+dist/
+
