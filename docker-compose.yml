@@ -12,8 +12,9 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-acme}:${POSTGRES_PASSWORD:-acme_dev_password}@postgres:5432/${POSTGRES_DB:-acme}
       REDIS_URL: redis://redis:6379/0
-      KEYCLOAK_URL: http://keycloak:8080
-      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-master} # switches to 'acme' in Phase 2
+      KEYCLOAK_URL: http://keycloak:8080 # internal: JWKS fetches
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-acme}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8080/realms/acme} # public: what tokens carry
       MCP_SERVER_URL: http://mcp-server:8765/mcp
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       PRIMARY_MODEL: ${PRIMARY_MODEL:-gpt-5.6-sol}
@@ -77,9 +78,11 @@ services:
 
   keycloak:
     image: quay.io/keycloak/keycloak:26.7.1
-    command: ["start-dev"] # dev mode is a documented local-scope trade-off; --import-realm added in Phase 2
+    command: ["start-dev", "--import-realm"] # dev mode is a documented local-scope trade-off
     ports:
       - "8080:8080"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}

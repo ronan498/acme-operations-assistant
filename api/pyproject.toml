@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     # mcp 2.0.0 was 16 days old at scaffold time — pinned to the mature major (see DECISIONS.md)
     "mcp>=1.29,<2",
+    "pyjwt[crypto]>=2.10",
 ]
 
 [dependency-groups]
@@ -31,3 +32,4 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]

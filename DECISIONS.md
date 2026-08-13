@@ -24,3 +24,15 @@ Host has no uv; builds install uv==0.12.4 in the builder stage and `uv lock && u
 
 **2026-08-13 23:08 — SQL files over Alembic**
 Versioned SQL in `db/init/` (Postgres entrypoint runs them on first boot). Faster at this scale and more legible to an assessor reading cold. Trade-off: no down-migrations; acceptable for a demo with `make down && make up` as the reset path.
+
+**2026-08-14 00:35 — Keycloak issuer split: internal JWKS URL, public issuer claim**
+Tokens are minted at `http://localhost:8080/realms/acme` (what browser/curl see) while the api verifies against JWKS fetched via `http://keycloak:8080` (compose network). Two distinct settings — conflating them is the classic Keycloak-in-docker 401. Production would set KC_HOSTNAME and collapse the split.
+
+**2026-08-14 00:35 — audience not verified in JWTs**
+Keycloak access tokens carry `aud=account` by default; mapping a custom audience buys nothing for a single-API deployment. Signature (RS256), expiry, and issuer are enforced. Documented so the panel hears it as a choice, not an oversight.
+
+**2026-08-14 00:35 — password grant enabled on the demo client**
+`directAccessGrantsEnabled: true` exists so the gate and evals can mint tokens via curl. OAuth 2.1 deprecates password grant — the real login path is auth-code + PKCE (Phase 5b). Demo convenience, clearly scoped.
+
+**2026-08-14 00:35 — Keycloak user IDs pinned to match the seeded users table**
+The realm import fixes each user's UUID (ada=1111…, sara=2222…, sam=3333…) so JWT `sub` claims join directly against `users`/`audit_log` with FK integrity. Keycloak remains the identity source of truth; Postgres mirrors the subjects.

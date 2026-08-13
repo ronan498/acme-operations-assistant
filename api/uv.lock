@@ -18,6 +18,7 @@ dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "pydantic-settings" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -36,6 +37,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "mcp", specifier = ">=1.29,<2" },
     { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
     { name = "redis", specifier = ">=5.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
 ]

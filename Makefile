@@ -15,12 +15,14 @@ ps: ## container status incl. health
 ready: ## readiness report from the api
 	@curl -s http://localhost:8000/ready | python3 -m json.tool
 
-test: ## run api tests inside the image
-	docker compose run --rm --no-deps api sh -c "pip install -q pytest pytest-asyncio && python -m pytest tests -q" 2>/dev/null || \
-	cd api && python3 -m pytest tests -q
+test: ## run api tests in the builder stage (has uv + dev deps)
+	docker build -q --target builder -t acme-api-test ./api >/dev/null
+	docker run --rm -v ./api/app:/srv/app:ro -v ./api/tests:/srv/tests:ro acme-api-test \
+		sh -c "uv sync -q && uv run pytest tests -q"
 
-lint: ## ruff over both services
-	cd api && python3 -m ruff check . 2>/dev/null || docker compose run --rm --no-deps api python -m ruff check .
+lint: ## ruff over the api service
+	docker build -q --target builder -t acme-api-test ./api >/dev/null
+	docker run --rm -v ./api/app:/srv/app:ro acme-api-test sh -c "uv sync -q && uv run ruff check app"
 
 seed: ## load schema + narrative seed data (idempotent, safe to re-run)
 	docker compose exec -T postgres psql -q -U acme -d acme -f /docker-entrypoint-initdb.d/01-schema.sql

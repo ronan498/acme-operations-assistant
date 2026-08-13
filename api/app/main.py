@@ -1,13 +1,26 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 
-from . import readiness
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from . import audit, readiness
+from .auth import Principal, get_principal
 from .config import settings
+from .policy import authorize
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    await audit.close_pool()
+
 
 app = FastAPI(
     title="Acme Operations Assistant",
     description="Agentic enterprise assistant — EY Applied AI Engineer case study",
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 
@@ -32,3 +45,40 @@ async def ready() -> JSONResponse:
             },
         },
     )
+
+
+@app.get("/me")
+async def me(principal: Principal = Depends(get_principal)) -> dict:
+    """Who am I, and what am I allowed to do? Demo aid and RBAC probe."""
+    return {
+        "sub": principal.sub,
+        "username": principal.username,
+        "roles": sorted(principal.roles),
+    }
+
+
+class AuthzCheck(BaseModel):
+    tool: str
+    args: dict = {}
+
+
+@app.post("/authz/check")
+async def authz_check(
+    body: AuthzCheck, principal: Principal = Depends(get_principal)
+) -> dict:
+    """Run the real authorization path for a tool call and audit the outcome.
+
+    This is the exact function the tool registry dispatches through from
+    Phase 3 — not a mock of it. Denials return 403 so the gate is visible.
+    """
+    decision = authorize(principal, body.tool)
+    await audit.record(
+        principal,
+        tool=body.tool,
+        args=body.args,
+        decision="allow" if decision.allow else "deny",
+        reason=decision.reason,
+    )
+    if not decision.allow:
+        raise HTTPException(status_code=403, detail=decision.reason)
+    return {"tool": body.tool, "decision": "allow", "reason": decision.reason}
