@@ -22,8 +22,10 @@ test: ## run api tests inside the image
 lint: ## ruff over both services
 	cd api && python3 -m ruff check . 2>/dev/null || docker compose run --rm --no-deps api python -m ruff check .
 
-seed: ## (Phase 1) load schema + narrative seed data
-	@echo "seed arrives in Phase 1"
+seed: ## load schema + narrative seed data (idempotent, safe to re-run)
+	docker compose exec -T postgres psql -q -U acme -d acme -f /docker-entrypoint-initdb.d/01-schema.sql
+	docker compose exec -T postgres psql -q -U acme -d acme -f /docker-entrypoint-initdb.d/02-seed.sql
+	@echo "seeded."
 
 eval: ## (Phase 7) run the eval harness
 	@echo "eval arrives in Phase 7"
