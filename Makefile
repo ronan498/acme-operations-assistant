@@ -20,7 +20,7 @@ chat: ## make chat U=sara Q="your question" [S=session-id]
 
 test: ## run api tests in the builder stage (has uv + dev deps)
 	docker build -q --target builder -t acme-api-test ./api >/dev/null
-	docker run --rm -v ./api/app:/srv/app:ro -v ./api/tests:/srv/tests:ro acme-api-test \
+	docker run --rm -v ./api/app:/srv/app:ro -v ./api/tests:/srv/tests:ro -v ./api/skills:/srv/skills:ro acme-api-test \
 		sh -c "uv sync -q && uv run pytest tests -q"
 
 lint: ## ruff over the api service

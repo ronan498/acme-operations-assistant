@@ -106,6 +106,7 @@ class LLMService:
         instructions: str,
         input_items: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        output_schema: dict[str, Any] | None = None,
     ) -> LLMResult:
         state = FallbackState(
             models=[settings.primary_model]
@@ -122,6 +123,15 @@ class LLMService:
                 }
                 if tools:
                     kwargs["tools"] = tools
+                if output_schema:
+                    kwargs["text"] = {
+                        "format": {
+                            "type": "json_schema",
+                            "name": output_schema["name"],
+                            "schema": output_schema["schema"],
+                            "strict": True,
+                        }
+                    }
                 resp = await self.client.responses.create(**kwargs)
 
                 usage: dict[str, int] = {}

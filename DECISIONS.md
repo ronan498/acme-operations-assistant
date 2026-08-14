@@ -45,3 +45,9 @@ Write tools take an `actor` param that is stripped from the model-facing schema 
 
 **2026-08-14 02:05 — parallel reads reuse the registry's read_only flag**
 Consecutive concurrency-safe tool calls in one round are gathered in parallel; anything else serialises, order preserved. No separate concurrency config to drift out of sync — the same annotation drives both authorization semantics and scheduling.
+
+**2026-08-14 02:40 — the Skill is a local tool behind the same gates**
+customer_escalation_summary runs in-process (it orchestrates tools + one structured LLM call) but registers, authorizes, and audits through the identical registry dispatch as MCP tools. Its gather steps run AS the calling principal — every sub-call individually audited — and its persist stage re-enters dispatch for the admin-gated write. The Skill has no privilege its caller lacks, by construction.
+
+**2026-08-14 02:40 — two-tier skill loading**
+Only frontmatter (name/description/when_to_use) rides in the agent's context as the tool description; the SKILL.md body loads on invocation as the reasoning call's instructions. The agent pays for the body only when the Skill fires — and the model demonstrably selects it from frontmatter alone.

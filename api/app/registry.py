@@ -47,7 +47,36 @@ ANNOTATIONS: dict[str, ToolMeta] = {
     "add_issue_update": _WRITE,
     "create_next_action": _WRITE,
     "update_next_action": _WRITE,
+    # reads for everyone; its persist stage re-enters dispatch for the
+    # admin-gated write. Not concurrency_safe: it makes its own LLM call.
+    "customer_escalation_summary": ToolMeta(read_only=True, max_result_chars=16_000),
 }
+
+# Local tools run in-process (they orchestrate other tools + LLM calls);
+# they pass the SAME three gates as MCP tools. Tier-1 skill frontmatter
+# becomes the tool description the agent sees.
+def _skill_schema() -> dict[str, Any]:
+    from .skillloader import load_skill
+
+    skill = load_skill("customer_escalation_summary")
+    return {
+        "type": "function",
+        "name": skill.name,
+        "description": skill.tool_description,
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["customer_name", "persist_next_action"],
+            "properties": {
+                "customer_name": {"type": "string", "description": "Customer to assess"},
+                "persist_next_action": {
+                    "type": "boolean",
+                    "description": "true ONLY if the user explicitly asked to save/record the recommended action",
+                },
+            },
+        },
+        "strict": True,
+    }
 
 _FAIL_CLOSED_META = ToolMeta()
 
@@ -100,7 +129,8 @@ class ToolRegistry:
                         "strict": strict,
                     }
                 )
-            self._schemas = schemas
+            schemas.append(_skill_schema())
+            self._schemas = sorted(schemas, key=lambda s: s["name"])
         return self._schemas
 
     async def dispatch(self, principal: Principal, tool: str, arguments_json: str) -> ToolOutcome:
@@ -133,6 +163,19 @@ class ToolRegistry:
 
         if self.meta(tool).inject_actor:
             args = {**args, "actor": principal.username}  # server-authoritative authorship
+
+        # gate 3 — local tools (Skills) run in-process, same gates already passed
+        if tool == "customer_escalation_summary":
+            from .escalation import run_skill
+
+            try:
+                content, is_error = await run_skill(principal, args)
+            except Exception as exc:  # noqa: BLE001
+                return _done(f"Skill failed: {type(exc).__name__}: {exc}", True, "error", args)
+            cap = self.meta(tool).max_result_chars
+            if len(content) > cap:
+                content = content[:cap] + f"\n[truncated at {cap} chars]"
+            return _done(content, is_error, "allow", args)
 
         # gate 3 — call over MCP, cap the result
         try:

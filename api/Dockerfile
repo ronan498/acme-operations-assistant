@@ -14,6 +14,7 @@ RUN useradd --create-home app
 WORKDIR /srv
 COPY --from=builder /srv/.venv /srv/.venv
 COPY app ./app
+COPY skills ./skills
 ENV PATH="/srv/.venv/bin:$PATH"
 USER app
 EXPOSE 8000
