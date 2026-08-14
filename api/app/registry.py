@@ -73,14 +73,16 @@ class ToolRegistry:
                 props = list(params.get("properties", {}))
                 # strict mode requires every property to be required
                 strict = sorted(params.get("required", [])) == sorted(props)
-                fn: dict[str, Any] = {
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "parameters": params,
-                }
-                if strict:
-                    fn["strict"] = True
-                schemas.append({"type": "function", "function": fn})
+                # Responses-API tool shape: flat, not nested under "function"
+                schemas.append(
+                    {
+                        "type": "function",
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "parameters": params,
+                        "strict": strict,
+                    }
+                )
             self._schemas = schemas
         return self._schemas
 

@@ -48,7 +48,7 @@ async def get_customer_profile(customer_name: str) -> dict[str, Any]:
     rows = await p.fetch(
         """
         SELECT c.id, c.name, c.tier, c.industry, c.account_owner, c.created_at,
-               count(i.id) FILTER (WHERE i.status != 'resolved') AS open_issues,
+               count(DISTINCT i.id) FILTER (WHERE i.status != 'resolved') AS open_issues,
                max(GREATEST(i.opened_at, coalesce(u.created_at, i.opened_at))) AS last_activity
         FROM customers c
         LEFT JOIN issues i ON i.customer_id = c.id

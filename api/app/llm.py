@@ -1,11 +1,15 @@
-"""LLM service — one seam in front of OpenAI.
+"""LLM service — one seam in front of OpenAI's Responses API.
+
+gpt-5.6-sol is a reasoning-class model: function tools + reasoning are
+only supported on /v1/responses (chat/completions returns a 400 unless
+reasoning is disabled entirely — the wrong trade). Discovered live, see
+AI_USAGE.md 2026-08-14.
 
 Retry taxonomy, not blanket retry: 429/5xx/timeouts back off and retry
-(Retry-After wins over local backoff); 4xx client errors never retry.
-Fallback chain (PRIMARY_MODEL → FALLBACK_MODELS) is wired but activates
+(Retry-After wins over local backoff); billing/quota 429s and other 4xx
+never retry. Fallback chain (PRIMARY_MODEL → FALLBACK_MODELS) activates
 only after consecutive capacity failures — switching models cold-starts
-the provider prompt cache, so eager fallback is a net loss (Phase 4
-turns it on; see PLAN).
+the provider prompt cache (Phase 4 turns it on; see PLAN).
 
 Usage is captured per call, including cached_tokens — the measured
 cache-hit signal (§4.8).
@@ -29,11 +33,13 @@ from .config import settings
 MAX_RETRIES = 4
 BASE_DELAY_S = 0.5
 MAX_DELAY_S = 16.0
+NEVER_RETRY_CODES = ("billing_not_active", "insufficient_quota", "billing_hard_limit_reached")
 
 
 @dataclass
 class LLMResult:
-    message: Any                      # the assistant message (may carry tool_calls)
+    output: list[Any]                 # response output items (reasoning, function_call, message)
+    output_text: str
     model: str
     usage: dict[str, int] = field(default_factory=dict)
 
@@ -52,34 +58,44 @@ class LLMService:
         base = min(BASE_DELAY_S * (2 ** (attempt - 1)), MAX_DELAY_S)
         return base + random.random() * 0.25 * base
 
-    async def chat(self, messages: list[dict], tools: list[dict]) -> LLMResult:
+    async def respond(
+        self,
+        instructions: str,
+        input_items: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> LLMResult:
         model = settings.primary_model
         attempt = 0
         while True:
             attempt += 1
             try:
-                kwargs: dict[str, Any] = {"model": model, "messages": messages}
+                kwargs: dict[str, Any] = {
+                    "model": model,
+                    "instructions": instructions,
+                    "input": input_items,
+                }
                 if tools:
                     kwargs["tools"] = tools
-                resp = await self._client.chat.completions.create(**kwargs)
-                usage = resp.usage
-                cached = 0
-                if usage and usage.prompt_tokens_details:
-                    cached = usage.prompt_tokens_details.cached_tokens or 0
+                resp = await self._client.responses.create(**kwargs)
+
+                usage: dict[str, int] = {}
+                if resp.usage:
+                    details = resp.usage.input_tokens_details
+                    usage = {
+                        "input_tokens": resp.usage.input_tokens,
+                        "output_tokens": resp.usage.output_tokens,
+                        "cached_tokens": details.cached_tokens if details else 0,
+                    }
                 return LLMResult(
-                    message=resp.choices[0].message,
+                    output=list(resp.output),
+                    output_text=resp.output_text or "",
                     model=resp.model,
-                    usage={
-                        "prompt_tokens": usage.prompt_tokens if usage else 0,
-                        "completion_tokens": usage.completion_tokens if usage else 0,
-                        "cached_tokens": cached,
-                    },
+                    usage=usage,
                 )
             except (RateLimitError, APITimeoutError, APIConnectionError) as exc:
                 # A 429 is not always transient: billing/quota exhaustion is a
                 # permanent condition wearing a rate-limit status code.
-                code = getattr(exc, "code", None) or ""
-                if code in ("billing_not_active", "insufficient_quota", "billing_hard_limit_reached"):
+                if (getattr(exc, "code", None) or "") in NEVER_RETRY_CODES:
                     raise
                 if attempt > MAX_RETRIES:
                     raise

@@ -55,13 +55,14 @@ async def run_agent(principal: Principal, session_id: str, user_message: str) ->
     memory = SessionMemory()
     history = await memory.get_turns(principal.sub, session_id)
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(history)
+    # Responses-API input items. History holds plain user/assistant text
+    # turns; tool-call items exist only within a single turn.
+    items: list[dict[str, Any]] = list(history)
     contextualised = (
         f"[requesting user: {principal.username}; roles: {', '.join(sorted(principal.roles))}]\n"
         f"{user_message}"
     )
-    messages.append({"role": "user", "content": contextualised})
+    items.append({"role": "user", "content": contextualised})
 
     tools = await registry.openai_schemas()
     total_usage: dict[str, int] = {}
@@ -73,33 +74,22 @@ async def run_agent(principal: Principal, session_id: str, user_message: str) ->
     answer = ""
     rounds = 0
     for rounds in range(1, MAX_TOOL_ROUNDS + 1):
-        result = await llm.chat(messages, tools)
+        result = await llm.respond(SYSTEM_PROMPT, items, tools)
         _accumulate(total_usage, result.usage)
         model_used = result.model
-        msg = result.message
 
-        if not msg.tool_calls:
-            answer = msg.content or ""
+        calls = [o for o in result.output if o.type == "function_call"]
+        if not calls:
+            answer = result.output_text
             stop_reason = "answered"
             break
 
-        messages.append(
-            {
-                "role": "assistant",
-                "content": msg.content,
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-                    }
-                    for tc in msg.tool_calls
-                ],
-            }
-        )
+        # Echo the model's output items back verbatim — reasoning items must
+        # accompany their function_calls when threading state manually.
+        items.extend(o.model_dump(exclude_none=True) for o in result.output)
 
-        for tc in msg.tool_calls:
-            key = (tc.function.name, tc.function.arguments or "")
+        for fc in calls:
+            key = (fc.name, fc.arguments or "")
             if key in seen_calls:
                 content, decision, latency = (
                     "Duplicate call: this exact tool call already ran this turn. "
@@ -109,18 +99,20 @@ async def run_agent(principal: Principal, session_id: str, user_message: str) ->
                 )
             else:
                 seen_calls.add(key)
-                outcome = await registry.dispatch(principal, tc.function.name, tc.function.arguments)
+                outcome = await registry.dispatch(principal, fc.name, fc.arguments)
                 content, decision, latency = outcome.content, outcome.decision, outcome.latency_ms
 
             tool_call_log.append(
                 {
-                    "tool": tc.function.name,
-                    "args": tc.function.arguments,
+                    "tool": fc.name,
+                    "args": fc.arguments,
                     "decision": decision,
                     "latency_ms": latency,
                 }
             )
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": content})
+            items.append(
+                {"type": "function_call_output", "call_id": fc.call_id, "output": content}
+            )
 
     if stop_reason == "loop_limit":
         answer = (

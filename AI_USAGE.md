@@ -26,3 +26,9 @@ The phoenix healthcheck used `CMD-SHELL`, but `arizephoenix/phoenix` contains no
 
 **2026-08-14 01:05 — caught: blanket 429 retry on a permanent billing error**
 The first live /chat call hit OpenAI's `429 billing_not_active` and the AI-written retry loop dutifully backed off four times against a condition that can never clear. Fixed: 429s with `billing_not_active` / `insufficient_quota` codes raise immediately. Lesson: a status code is not a taxonomy — the error *code* decides retryability.
+
+**2026-08-14 01:25 — caught: stale API-surface assumption for gpt-5.6**
+The AI wrote the LLM seam against chat/completions (its training-era default). gpt-5.6-sol rejected it live: function tools + reasoning require the Responses API. The alternative — disabling reasoning to keep the old surface — was the wrong trade for a flagship reasoning model. Migrated the seam (one file + the loop's item handling); the 400's own error message was the migration guide.
+
+**2026-08-14 01:25 — caught: the same SQL fan-out bug, twice**
+The first live agent answer said Northwind has 7 open issues; it has 3. `count()` inflated by the LEFT JOIN to issue_updates — the exact bug caught and fixed in a hand-written verification query during Phase 1, then re-introduced by the AI in the MCP tool's SQL. Caught by reading the agent's output against known seed data. Two lessons: AI repeats a bug class even after one instance was fixed nearby, and "grounded in a tool result" is not "correct" — which is precisely why the eval set checks grounding against the database, not against the tool output.
