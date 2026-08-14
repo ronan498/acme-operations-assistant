@@ -51,3 +51,9 @@ customer_escalation_summary runs in-process (it orchestrates tools + one structu
 
 **2026-08-14 02:40 — two-tier skill loading**
 Only frontmatter (name/description/when_to_use) rides in the agent's context as the tool description; the SKILL.md body loads on invocation as the reasoning call's instructions. The agent pays for the body only when the Skill fires — and the model demonstrably selects it from frontmatter alone.
+
+**2026-08-14 11:10 — model prices pinned from the live pricing page, not memory**
+gpt-5.6-sol $5/$0.50-cached/$30 per 1M (verified 2026-08-14 against the OpenAI pricing page); fallbacks likewise. Unknown models report cost=None rather than a fabricated number; MODEL_PRICES_JSON env overrides when prices move.
+
+**2026-08-14 11:10 — one trace id, three systems**
+The OTel trace id is returned to the caller, stamped on every audit_log row written inside the request, and is the Phoenix waterfall key. "Why was this denied?" and "why was this slow?" join on the same identifier from SQL, the API response, and the trace UI.

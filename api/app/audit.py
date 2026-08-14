@@ -35,6 +35,10 @@ async def record(
     request_id: str | None = None,
     trace_id: str | None = None,
 ) -> None:
+    if trace_id is None:
+        from .telemetry import current_trace_id
+
+        trace_id = current_trace_id()  # joins audit rows to Phoenix waterfalls
     pool = await get_pool()
     await pool.execute(
         """

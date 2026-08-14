@@ -134,6 +134,24 @@ class ToolRegistry:
         return self._schemas
 
     async def dispatch(self, principal: Principal, tool: str, arguments_json: str) -> ToolOutcome:
+        from .telemetry import tracer
+
+        with tracer().start_as_current_span(f"tool.{tool}") as span:
+            outcome = await self._dispatch_inner(principal, tool, arguments_json)
+            span.set_attributes(
+                {
+                    "tool.name": tool,
+                    "tool.decision": outcome.decision,
+                    "tool.is_error": outcome.is_error,
+                    "tool.latency_ms": outcome.latency_ms,
+                    "user.name": principal.username,
+                }
+            )
+            return outcome
+
+    async def _dispatch_inner(
+        self, principal: Principal, tool: str, arguments_json: str
+    ) -> ToolOutcome:
         start = time.perf_counter()
 
         def _done(content: str, is_error: bool, decision: str, args: dict) -> ToolOutcome:
