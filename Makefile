@@ -32,5 +32,5 @@ seed: ## load schema + narrative seed data (idempotent, safe to re-run)
 	docker compose exec -T postgres psql -q -U acme -d acme -f /docker-entrypoint-initdb.d/02-seed.sql
 	@echo "seeded."
 
-eval: ## (Phase 7) run the eval harness
-	@echo "eval arrives in Phase 7"
+eval: ## run the eval harness (10 cases) -> EVAL_RESULTS.md + evals/results.json
+	python3 scripts/run_eval.py evals/cases.json
