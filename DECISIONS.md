@@ -36,3 +36,12 @@ Keycloak access tokens carry `aud=account` by default; mapping a custom audience
 
 **2026-08-14 00:35 — Keycloak user IDs pinned to match the seeded users table**
 The realm import fixes each user's UUID (ada=1111…, sara=2222…, sam=3333…) so JWT `sub` claims join directly against `users`/`audit_log` with FK integrity. Keycloak remains the identity source of truth; Postgres mirrors the subjects.
+
+**2026-08-14 02:05 — Redis vs Postgres (§4.7 rationale)**
+Redis holds two things: conversation memory (keyed principal+session, 20-turn cap, 1h TTL) and a read-through customer-lookup cache (5-min TTL). Both are ephemeral by nature — losing them costs a cache miss or a fresh conversation, never data. Postgres holds everything a business decision depends on: issues, updates, actions, audit. Rule: anything a write depends on is re-read from Postgres; Redis is never the source of truth. Trade-off: repeat reads cost a Redis hop; correctness is never negotiated against a TTL.
+
+**2026-08-14 02:05 — authorship is injected server-side, not model-supplied**
+Write tools take an `actor` param that is stripped from the model-facing schema and overwritten by the registry from the JWT principal. The model cannot claim to be someone else, no matter what a prompt (or injected issue text) says. Complements the fail-closed policy table.
+
+**2026-08-14 02:05 — parallel reads reuse the registry's read_only flag**
+Consecutive concurrency-safe tool calls in one round are gathered in parallel; anything else serialises, order preserved. No separate concurrency config to drift out of sync — the same annotation drives both authorization semantics and scheduling.

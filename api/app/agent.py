@@ -6,6 +6,7 @@ caching. Per-request context (who is asking) rides in the user turn,
 after the stable prefix.
 """
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -88,20 +89,52 @@ async def run_agent(principal: Principal, session_id: str, user_message: str) ->
         # accompany their function_calls when threading state manually.
         items.extend(o.model_dump(exclude_none=True) for o in result.output)
 
+        # Plan sequentially (duplicate detection is order-dependent), then
+        # partition: consecutive concurrency-safe reads run in parallel,
+        # writes serialise — same read_only flag the registry already holds.
+        async def execute(fc: Any) -> tuple[Any, str, str, float]:
+            outcome = await registry.dispatch(principal, fc.name, fc.arguments)
+            return fc, outcome.content, outcome.decision, outcome.latency_ms
+
+        planned: list[tuple[Any, bool]] = []  # (call, is_duplicate)
         for fc in calls:
             key = (fc.name, fc.arguments or "")
-            if key in seen_calls:
-                content, decision, latency = (
-                    "Duplicate call: this exact tool call already ran this turn. "
-                    "Use the earlier result instead of repeating it.",
-                    "duplicate",
-                    0.0,
-                )
-            else:
-                seen_calls.add(key)
-                outcome = await registry.dispatch(principal, fc.name, fc.arguments)
-                content, decision, latency = outcome.content, outcome.decision, outcome.latency_ms
+            planned.append((fc, key in seen_calls))
+            seen_calls.add(key)
 
+        executed: list[tuple[Any, str, str, float]] = []
+        batch: list[Any] = []
+
+        async def flush_batch() -> None:
+            if len(batch) == 1:
+                executed.append(await execute(batch[0]))
+            elif batch:
+                executed.extend(await asyncio.gather(*(execute(fc) for fc in batch)))
+            batch.clear()
+
+        for fc, is_dup in planned:
+            if is_dup:
+                await flush_batch()
+                executed.append(
+                    (
+                        fc,
+                        "Duplicate call: this exact tool call already ran this turn. "
+                        "Use the earlier result instead of repeating it.",
+                        "duplicate",
+                        0.0,
+                    )
+                )
+            elif registry.meta(fc.name).concurrency_safe:
+                batch.append(fc)
+            else:
+                await flush_batch()
+                executed.append(await execute(fc))
+        await flush_batch()
+
+        # results appended in the model's original call order
+        by_id = {id(fc): (content, decision, latency) for fc, content, decision, latency in executed}
+        for fc in calls:
+            content, decision, latency = by_id[id(fc)]
             tool_call_log.append(
                 {
                     "tool": fc.name,

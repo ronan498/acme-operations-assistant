@@ -34,6 +34,43 @@ MAX_RETRIES = 4
 BASE_DELAY_S = 0.5
 MAX_DELAY_S = 16.0
 NEVER_RETRY_CODES = ("billing_not_active", "insufficient_quota", "billing_hard_limit_reached")
+CONSECUTIVE_BEFORE_FALLBACK = 3  # never fall back on the first error: switching
+MAX_TOTAL_ATTEMPTS = 10          # models cold-starts the provider prompt cache
+
+
+@dataclass
+class FallbackState:
+    """Pure retry/fallback decision logic — unit-tested without SDK objects.
+
+    Capacity errors (429/5xx/timeouts) back off on the SAME model first;
+    only CONSECUTIVE_BEFORE_FALLBACK failures in a row move down the chain.
+    """
+
+    models: list[str]
+    model_idx: int = 0
+    consecutive_capacity: int = 0
+    total_attempts: int = 0
+
+    @property
+    def model(self) -> str:
+        return self.models[self.model_idx]
+
+    def on_success(self) -> None:
+        self.consecutive_capacity = 0
+
+    def on_capacity_error(self) -> str:
+        """Returns 'retry' | 'fallback' | 'exhausted'."""
+        self.total_attempts += 1
+        self.consecutive_capacity += 1
+        if self.total_attempts >= MAX_TOTAL_ATTEMPTS:
+            return "exhausted"
+        if self.consecutive_capacity >= CONSECUTIVE_BEFORE_FALLBACK:
+            if self.model_idx + 1 < len(self.models):
+                self.model_idx += 1
+                self.consecutive_capacity = 0
+                return "fallback"
+            return "exhausted"
+        return "retry"
 
 
 @dataclass
@@ -46,7 +83,13 @@ class LLMResult:
 
 class LLMService:
     def __init__(self) -> None:
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client: AsyncOpenAI | None = None  # lazy: no import-time side effects
+
+    @property
+    def client(self) -> AsyncOpenAI:
+        if self._client is None:
+            self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        return self._client
 
     @staticmethod
     def _delay(attempt: int, retry_after: str | None) -> float:
@@ -64,19 +107,22 @@ class LLMService:
         input_items: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> LLMResult:
-        model = settings.primary_model
+        state = FallbackState(
+            models=[settings.primary_model]
+            + [m.strip() for m in settings.fallback_models.split(",") if m.strip()]
+        )
         attempt = 0
         while True:
             attempt += 1
             try:
                 kwargs: dict[str, Any] = {
-                    "model": model,
+                    "model": state.model,
                     "instructions": instructions,
                     "input": input_items,
                 }
                 if tools:
                     kwargs["tools"] = tools
-                resp = await self._client.responses.create(**kwargs)
+                resp = await self.client.responses.create(**kwargs)
 
                 usage: dict[str, int] = {}
                 if resp.usage:
@@ -97,17 +143,19 @@ class LLMService:
                 # permanent condition wearing a rate-limit status code.
                 if (getattr(exc, "code", None) or "") in NEVER_RETRY_CODES:
                     raise
-                if attempt > MAX_RETRIES:
+                action = state.on_capacity_error()
+                if action == "exhausted":
                     raise
                 retry_after = None
                 if isinstance(exc, RateLimitError):
                     retry_after = (exc.response.headers or {}).get("retry-after")
-                await asyncio.sleep(self._delay(attempt, retry_after))
+                await asyncio.sleep(0.1 if action == "fallback" else self._delay(attempt, retry_after))
             except APIStatusError as exc:
-                if exc.status_code >= 500 and attempt <= MAX_RETRIES:
-                    await asyncio.sleep(self._delay(attempt, None))
-                    continue
-                raise  # 4xx: our request is wrong — retrying cannot fix it
+                if exc.status_code < 500:
+                    raise  # 4xx: our request is wrong — retrying cannot fix it
+                if state.on_capacity_error() == "exhausted":
+                    raise
+                await asyncio.sleep(self._delay(attempt, None))
 
 
 llm = LLMService()

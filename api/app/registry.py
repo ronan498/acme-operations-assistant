@@ -32,10 +32,21 @@ class ToolMeta:
     read_only: bool = False        # fail-closed: assume it writes
     concurrency_safe: bool = False # fail-closed: assume it must serialise
     max_result_chars: int = 8_000  # cap what flows into model context
+    inject_actor: bool = False     # server sets args["actor"] from the Principal;
+                                   # the param is stripped from the model's schema —
+                                   # authorship cannot be spoofed by the model
 
+
+_READ = ToolMeta(read_only=True, concurrency_safe=True)
+_WRITE = ToolMeta(inject_actor=True)
 
 ANNOTATIONS: dict[str, ToolMeta] = {
-    "get_customer_profile": ToolMeta(read_only=True, concurrency_safe=True),
+    "get_customer_profile": _READ,
+    "get_open_issues": _READ,
+    "summarise_issue_history": _READ,
+    "add_issue_update": _WRITE,
+    "create_next_action": _WRITE,
+    "update_next_action": _WRITE,
 }
 
 _FAIL_CLOSED_META = ToolMeta()
@@ -69,6 +80,12 @@ class ToolRegistry:
             schemas = []
             for tool in sorted(listing.tools, key=lambda t: t.name):
                 params = dict(tool.inputSchema)
+                if self.meta(tool.name).inject_actor:
+                    # the model never sees (or controls) the actor param
+                    params["properties"] = {
+                        k: v for k, v in params.get("properties", {}).items() if k != "actor"
+                    }
+                    params["required"] = [r for r in params.get("required", []) if r != "actor"]
                 params["additionalProperties"] = False
                 props = list(params.get("properties", {}))
                 # strict mode requires every property to be required
@@ -113,6 +130,9 @@ class ToolRegistry:
                 "Explain this to the user plainly and suggest a user with the required role.",
                 True, "deny", args,
             )
+
+        if self.meta(tool).inject_actor:
+            args = {**args, "actor": principal.username}  # server-authoritative authorship
 
         # gate 3 — call over MCP, cap the result
         try:

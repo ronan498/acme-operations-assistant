@@ -32,3 +32,6 @@ The AI wrote the LLM seam against chat/completions (its training-era default). g
 
 **2026-08-14 01:25 — caught: the same SQL fan-out bug, twice**
 The first live agent answer said Northwind has 7 open issues; it has 3. `count()` inflated by the LEFT JOIN to issue_updates — the exact bug caught and fixed in a hand-written verification query during Phase 1, then re-introduced by the AI in the MCP tool's SQL. Caught by reading the agent's output against known seed data. Two lessons: AI repeats a bug class even after one instance was fixed nearby, and "grounded in a tool result" is not "correct" — which is precisely why the eval set checks grounding against the database, not against the tool output.
+
+**2026-08-14 02:05 — caught: import-time OpenAI client construction**
+Module-level `AsyncOpenAI()` blew up test collection in an environment with no API key — an import-time side effect the AI wrote without being asked to. Made the client lazy. Caught by the test harness, which is the point of having one.

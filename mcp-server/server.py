@@ -10,6 +10,7 @@ before any call arrives here; the audit trail is written there too.
 """
 
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
@@ -36,6 +37,37 @@ async def pool() -> asyncpg.Pool:
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
+
+
+async def _resolve_customer(customer_name: str) -> tuple[dict[str, Any] | None, Any]:
+    """Resolve a customer name to a single row, or an ambiguity/not-found payload."""
+    p = await pool()
+    rows = await p.fetch(
+        "SELECT id, name FROM customers WHERE lower(name) LIKE '%' || lower($1) || '%' ORDER BY name",
+        customer_name.strip(),
+    )
+    exact = [r for r in rows if r["name"].lower() == customer_name.strip().lower()]
+    if len(exact) == 1:
+        rows = exact
+    if not rows:
+        return {"found": False, "message": f"No customer matching '{customer_name}'."}, None
+    if len(rows) > 1:
+        return {
+            "found": False,
+            "ambiguous": True,
+            "candidates": [r["name"] for r in rows],
+            "message": "Multiple customers match — ask the user which one they mean.",
+        }, None
+    return None, rows[0]
+
+
+def _parse_uuid(value: str) -> str | None:
+    import uuid
+
+    try:
+        return str(uuid.UUID(value.strip()))
+    except (ValueError, AttributeError):
+        return None
 
 
 @mcp.tool()
@@ -89,6 +121,190 @@ async def get_customer_profile(customer_name: str) -> dict[str, Any]:
         "open_issues": r["open_issues"],
         "last_activity": r["last_activity"].date().isoformat() if r["last_activity"] else None,
     }
+
+
+@mcp.tool()
+async def get_open_issues(customer_name: str) -> dict[str, Any]:
+    """List all unresolved issues for a customer: id, title, status, priority,
+    assignee, age in days, and update activity. Use the returned issue_id
+    values with summarise_issue_history or the write tools."""
+    err, customer = await _resolve_customer(customer_name)
+    if err:
+        return err
+    p = await pool()
+    rows = await p.fetch(
+        """
+        SELECT i.id, i.title, i.status, i.priority, i.assigned_to, i.opened_at,
+               count(u.id) AS update_count, max(u.created_at) AS last_update_at
+        FROM issues i
+        LEFT JOIN issue_updates u ON u.issue_id = i.id
+        WHERE i.customer_id = $1 AND i.status != 'resolved'
+        GROUP BY i.id
+        ORDER BY array_position(ARRAY['critical','high','medium','low'], i.priority), i.opened_at
+        """,
+        customer["id"],
+    )
+    return {
+        "found": True,
+        "customer": customer["name"],
+        "open_issue_count": len(rows),
+        "issues": [
+            {
+                "issue_id": str(r["id"]),
+                "title": r["title"],
+                "status": r["status"],
+                "priority": r["priority"],
+                "assigned_to": r["assigned_to"],  # null means unassigned
+                "opened_at": r["opened_at"].date().isoformat(),
+                "age_days": (datetime.now(UTC) - r["opened_at"]).days,
+                "update_count": r["update_count"],
+                "last_update_at": r["last_update_at"].date().isoformat() if r["last_update_at"] else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@mcp.tool()
+async def summarise_issue_history(issue_id: str) -> dict[str, Any]:
+    """Full history of one issue: the issue record, every update in
+    chronological order, and any next actions attached to it. The caller
+    summarises; this tool returns the verbatim facts."""
+    iid = _parse_uuid(issue_id)
+    if iid is None:
+        return {"found": False, "message": f"'{issue_id}' is not a valid issue id."}
+    p = await pool()
+    issue = await p.fetchrow(
+        """
+        SELECT i.*, c.name AS customer_name FROM issues i
+        JOIN customers c ON c.id = i.customer_id WHERE i.id = $1
+        """,
+        iid,
+    )
+    if issue is None:
+        return {"found": False, "message": f"No issue with id {issue_id}."}
+    updates = await p.fetch(
+        "SELECT author, body, created_at FROM issue_updates WHERE issue_id = $1 ORDER BY created_at",
+        iid,
+    )
+    actions = await p.fetch(
+        "SELECT id, action, status, created_by, created_at, updated_by, updated_at "
+        "FROM next_actions WHERE issue_id = $1 ORDER BY created_at",
+        iid,
+    )
+    return {
+        "found": True,
+        "issue": {
+            "issue_id": str(issue["id"]),
+            "customer": issue["customer_name"],
+            "title": issue["title"],
+            "description": issue["description"],
+            "status": issue["status"],
+            "priority": issue["priority"],
+            "assigned_to": issue["assigned_to"],
+            "opened_at": issue["opened_at"].date().isoformat(),
+        },
+        "updates": [
+            {"author": u["author"], "body": u["body"], "at": u["created_at"].date().isoformat()}
+            for u in updates
+        ],
+        "next_actions": [
+            {
+                "action_id": str(a["id"]),
+                "action": a["action"],
+                "status": a["status"],
+                "created_by": a["created_by"],
+            }
+            for a in actions
+        ],
+    }
+
+
+@mcp.tool()
+async def add_issue_update(issue_id: str, body: str, actor: str) -> dict[str, Any]:
+    """Append an update to an issue's history. The actor field is set by the
+    platform, never by the model."""
+    iid = _parse_uuid(issue_id)
+    if iid is None:
+        return {"ok": False, "message": f"'{issue_id}' is not a valid issue id."}
+    if not body.strip():
+        return {"ok": False, "message": "Update body must not be empty."}
+    p = await pool()
+    row = await p.fetchrow(
+        """
+        INSERT INTO issue_updates (id, issue_id, author, body, created_at)
+        VALUES (gen_random_uuid(), $1, $2, $3, now())
+        RETURNING id, created_at
+        """,
+        iid,
+        actor,
+        body.strip(),
+    )
+    if row is None:
+        return {"ok": False, "message": f"No issue with id {issue_id}."}
+    return {"ok": True, "update_id": str(row["id"]), "author": actor,
+            "at": row["created_at"].isoformat()}
+
+
+@mcp.tool()
+async def create_next_action(issue_id: str, action: str, actor: str) -> dict[str, Any]:
+    """Create a recommended next action for an issue. The actor field is set
+    by the platform, never by the model."""
+    iid = _parse_uuid(issue_id)
+    if iid is None:
+        return {"ok": False, "message": f"'{issue_id}' is not a valid issue id."}
+    if not action.strip():
+        return {"ok": False, "message": "Action text must not be empty."}
+    p = await pool()
+    row = await p.fetchrow(
+        """
+        INSERT INTO next_actions (id, issue_id, action, status, created_by)
+        VALUES (gen_random_uuid(), $1, $2, 'proposed', $3)
+        RETURNING id, created_at
+        """,
+        iid,
+        action.strip(),
+        actor,
+    )
+    return {"ok": True, "action_id": str(row["id"]), "status": "proposed",
+            "created_by": actor, "at": row["created_at"].isoformat()}
+
+
+@mcp.tool()
+async def update_next_action(
+    action_id: str, actor: str, status: str | None = None, action_text: str | None = None
+) -> dict[str, Any]:
+    """Update an existing next action's status (proposed/in_progress/done/
+    cancelled) and/or its text. The actor field is set by the platform,
+    never by the model."""
+    aid = _parse_uuid(action_id)
+    if aid is None:
+        return {"ok": False, "message": f"'{action_id}' is not a valid action id."}
+    allowed = {"proposed", "in_progress", "done", "cancelled"}
+    if status is not None and status not in allowed:
+        return {"ok": False, "message": f"status must be one of {sorted(allowed)}."}
+    if status is None and action_text is None:
+        return {"ok": False, "message": "Nothing to update: provide status and/or action_text."}
+    p = await pool()
+    row = await p.fetchrow(
+        """
+        UPDATE next_actions
+        SET status = coalesce($2, status),
+            action = coalesce($3, action),
+            updated_by = $4,
+            updated_at = now()
+        WHERE id = $1
+        RETURNING id, action, status, updated_at
+        """,
+        aid,
+        status,
+        action_text,
+        actor,
+    )
+    if row is None:
+        return {"ok": False, "message": f"No next action with id {action_id}."}
+    return {"ok": True, "action_id": str(row["id"]), "action": row["action"],
+            "status": row["status"], "updated_by": actor, "at": row["updated_at"].isoformat()}
 
 
 if __name__ == "__main__":
