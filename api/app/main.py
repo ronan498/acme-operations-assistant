@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from . import audit, readiness
+from .agent import run_agent
 from .auth import Principal, get_principal
 from .config import settings
 from .policy import authorize
@@ -54,6 +55,33 @@ async def me(principal: Principal = Depends(get_principal)) -> dict:
         "sub": principal.sub,
         "username": principal.username,
         "roles": sorted(principal.roles),
+    }
+
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str = "default"
+
+
+@app.post("/chat")
+async def chat(
+    body: ChatRequest, principal: Principal = Depends(get_principal)
+) -> dict:
+    """The agent: auth → ReAct loop → registry-gated tools → grounded answer."""
+    try:
+        result = await run_agent(principal, body.session_id, body.message)
+    except Exception as exc:  # noqa: BLE001 — surface upstream failures as a clean 502
+        raise HTTPException(
+            status_code=502, detail=f"model upstream error: {type(exc).__name__}: {exc}"
+        ) from exc
+    return {
+        "answer": result.answer,
+        "session_id": body.session_id,
+        "stop_reason": result.stop_reason,
+        "rounds": result.rounds,
+        "tool_calls": result.tool_calls,
+        "usage": result.usage,
+        "model": result.model,
     }
 
 

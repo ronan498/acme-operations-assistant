@@ -15,6 +15,9 @@ ps: ## container status incl. health
 ready: ## readiness report from the api
 	@curl -s http://localhost:8000/ready | python3 -m json.tool
 
+chat: ## make chat U=sara Q="your question" [S=session-id]
+	@./scripts/chat.sh "$(U)" "$(Q)" "$(or $(S),default)"
+
 test: ## run api tests in the builder stage (has uv + dev deps)
 	docker build -q --target builder -t acme-api-test ./api >/dev/null
 	docker run --rm -v ./api/app:/srv/app:ro -v ./api/tests:/srv/tests:ro acme-api-test \

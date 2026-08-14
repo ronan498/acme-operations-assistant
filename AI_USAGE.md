@@ -23,3 +23,6 @@ The multi-stage build created the venv at `/build/.venv` and copied it to `/srv/
 
 **2026-08-14 00:15 — caught: healthcheck assumed a shell the image doesn't ship**
 The phoenix healthcheck used `CMD-SHELL`, but `arizephoenix/phoenix` contains no `sh` — the check could never pass while the endpoint it probed returned 200 all along. Diagnosed by exec'ing the probe directly (worked) vs via shell (exec: "sh" not found). Fix: exec-form `CMD`. Lesson: verify image contents before assuming POSIX furniture.
+
+**2026-08-14 01:05 — caught: blanket 429 retry on a permanent billing error**
+The first live /chat call hit OpenAI's `429 billing_not_active` and the AI-written retry loop dutifully backed off four times against a condition that can never clear. Fixed: 429s with `billing_not_active` / `insufficient_quota` codes raise immediately. Lesson: a status code is not a taxonomy — the error *code* decides retryability.
