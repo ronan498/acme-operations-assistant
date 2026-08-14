@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import audit, readiness, telemetry
@@ -109,6 +111,13 @@ async def chat(
 async def stats(principal: Principal = Depends(get_principal)) -> dict:
     """Running totals since boot — tokens, cache hit rate, estimated spend."""
     return totals.snapshot()
+
+
+# The UI: a static Vite build served same-origin. Mounted last so every API
+# route above wins; anything else falls through to index.html.
+_static = Path(__file__).parent.parent / "static"
+if _static.is_dir():
+    app.mount("/", StaticFiles(directory=_static, html=True), name="ui")
 
 
 class AuthzCheck(BaseModel):

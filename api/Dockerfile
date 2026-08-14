@@ -1,4 +1,11 @@
 # syntax=docker/dockerfile:1
+FROM node:20-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm install --no-audit --no-fund
+COPY web/ .
+RUN npm run build
+
 FROM python:3.12-slim AS builder
 # uv pinned via PyPI (0.12.4 verified 2026-08-13); no local uv on the host
 RUN pip install --no-cache-dir uv==0.12.4
@@ -13,6 +20,7 @@ FROM python:3.12-slim
 RUN useradd --create-home app
 WORKDIR /srv
 COPY --from=builder /srv/.venv /srv/.venv
+COPY --from=web /web/dist /srv/static
 COPY app ./app
 COPY skills ./skills
 ENV PATH="/srv/.venv/bin:$PATH"
