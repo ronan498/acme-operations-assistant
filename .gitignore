@@ -20,3 +20,6 @@ __pycache__/
 node_modules/
 dist/
 
+
+# Personal interview-prep material - never ships to EY
+REVISION_GUIDE.html
