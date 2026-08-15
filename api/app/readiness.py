@@ -35,7 +35,8 @@ async def _check_redis() -> None:
 
 
 async def _check_keycloak() -> None:
-    url = f"{settings.keycloak_url}/realms/{settings.keycloak_realm}/.well-known/openid-configuration"
+    base = f"{settings.keycloak_url}/realms/{settings.keycloak_realm}"
+    url = f"{base}/.well-known/openid-configuration"
     async with httpx.AsyncClient(timeout=3) as client:
         resp = await client.get(url)
         resp.raise_for_status()

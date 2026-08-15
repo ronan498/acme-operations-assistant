@@ -103,6 +103,7 @@ class LLMService:
 
     @staticmethod
     def _result_from_response(resp: Any) -> LLMResult:
+        from .costs import totals  # metered at the seam: EVERY call counts, incl. the Skill's
         usage: dict[str, int] = {}
         if resp.usage:
             details = resp.usage.input_tokens_details
@@ -111,6 +112,8 @@ class LLMService:
                 "output_tokens": resp.usage.output_tokens,
                 "cached_tokens": details.cached_tokens if details else 0,
             }
+        if usage:
+            totals.add(resp.model, usage)
         return LLMResult(
             output=list(resp.output),
             output_text=resp.output_text or "",
@@ -130,10 +133,7 @@ class LLMService:
         a failure after streaming begins surfaces to the caller - replaying a
         half-consumed stream would double tool side effects.
         """
-        state = FallbackState(
-            models=[settings.primary_model]
-            + [m.strip() for m in settings.fallback_models.split(",") if m.strip()]
-        )
+        state = FallbackState(models=settings.model_chain())
         attempt = 0
         while True:
             attempt += 1
@@ -151,12 +151,14 @@ class LLMService:
             except (RateLimitError, APITimeoutError, APIConnectionError) as exc:
                 if (getattr(exc, "code", None) or "") in NEVER_RETRY_CODES:
                     raise
-                if state.on_capacity_error() == "exhausted":
+                action = state.on_capacity_error()
+                if action == "exhausted":
                     raise
                 retry_after = None
                 if isinstance(exc, RateLimitError):
                     retry_after = (exc.response.headers or {}).get("retry-after")
-                await asyncio.sleep(self._delay(attempt, retry_after))
+                delay = 0.1 if action == "fallback" else self._delay(attempt, retry_after)
+                await asyncio.sleep(delay)
             except APIStatusError as exc:
                 if exc.status_code < 500 or state.on_capacity_error() == "exhausted":
                     raise
@@ -167,10 +169,13 @@ class LLMService:
             kind = getattr(event, "type", "")
             if kind == "response.output_text.delta":
                 yield ("delta", event.delta)
-            elif kind == "response.completed":
-                final = event.response
+            elif kind in ("response.completed", "response.incomplete"):
+                final = event.response  # incomplete = token-cap/stop: keep partial + usage
+            elif kind == "response.failed":
+                err = getattr(event.response, "error", None)
+                raise RuntimeError(f"model stream failed: {err}")
         if final is None:
-            raise RuntimeError("stream ended without response.completed")
+            raise RuntimeError("stream ended without a terminal response event")
         yield ("done", self._result_from_response(final))
 
     async def respond(
@@ -180,10 +185,7 @@ class LLMService:
         tools: list[dict[str, Any]],
         output_schema: dict[str, Any] | None = None,
     ) -> LLMResult:
-        state = FallbackState(
-            models=[settings.primary_model]
-            + [m.strip() for m in settings.fallback_models.split(",") if m.strip()]
-        )
+        state = FallbackState(models=settings.model_chain())
         attempt = 0
         while True:
             attempt += 1
@@ -217,7 +219,8 @@ class LLMService:
                 retry_after = None
                 if isinstance(exc, RateLimitError):
                     retry_after = (exc.response.headers or {}).get("retry-after")
-                await asyncio.sleep(0.1 if action == "fallback" else self._delay(attempt, retry_after))
+                delay = 0.1 if action == "fallback" else self._delay(attempt, retry_after)
+                await asyncio.sleep(delay)
             except APIStatusError as exc:
                 if exc.status_code < 500:
                     raise  # 4xx: our request is wrong — retrying cannot fix it

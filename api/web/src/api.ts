@@ -7,9 +7,10 @@ export type ToolCall = {
 };
 
 export type StreamEvent =
-  | { type: "tool_start"; tool: string; args: string }
-  | { type: "tool_end"; tool: string; decision: ToolCall["decision"]; latency_ms: number; is_error: boolean; sql: string[] | null }
+  | { type: "tool_start"; call_id: string; tool: string; args: string }
+  | { type: "tool_end"; call_id: string; tool: string; decision: ToolCall["decision"]; latency_ms: number; is_error: boolean; sql: string[] | null }
   | { type: "delta"; text: string }
+  | { type: "text_reset" }
   | ({ type: "final"; est_cost_usd: number | null; trace_id: string | null } & Omit<ChatResponse, "est_cost_usd" | "trace_id">)
   | { type: "error"; detail: string };
 

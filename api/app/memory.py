@@ -21,8 +21,22 @@ SESSION_TTL_S = 60 * 60      # a working session, not durable storage
 CACHE_TTL_S = 300
 
 
+_shared: Redis | None = None
+
+
 def _client() -> Redis:
-    return Redis.from_url(settings.redis_url, decode_responses=True)
+    """One shared client per process - per-request clients leaked on error paths."""
+    global _shared
+    if _shared is None:
+        _shared = Redis.from_url(settings.redis_url, decode_responses=True)
+    return _shared
+
+
+async def close_shared() -> None:
+    global _shared
+    if _shared is not None:
+        await _shared.aclose()
+        _shared = None
 
 
 class SessionMemory:
@@ -45,9 +59,6 @@ class SessionMemory:
         raw = await self._r.lrange(self._key(sub, session_id), 0, -1)
         return [json.loads(item) for item in raw]
 
-    async def aclose(self) -> None:
-        await self._r.aclose()
-
 
 class LookupCache:
     def __init__(self, redis: Redis | None = None) -> None:
@@ -63,6 +74,3 @@ class LookupCache:
 
     async def set(self, namespace: str, ref: str, value: Any, ttl_s: int = CACHE_TTL_S) -> None:
         await self._r.set(self._key(namespace, ref), json.dumps(value), ex=ttl_s)
-
-    async def aclose(self) -> None:
-        await self._r.aclose()

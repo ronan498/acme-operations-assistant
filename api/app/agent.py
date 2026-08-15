@@ -76,10 +76,24 @@ async def run_agent_events(principal: Principal, session_id: str, user_message: 
     seen_calls: set[tuple[str, str]] = set()
     model_used = ""
 
+    async def execute(fc: Any) -> tuple[Any, Any]:
+        return fc, await registry.dispatch(principal, fc.name, fc.arguments)
+
+    async def flush(batch: list[Any]) -> list[tuple[Any, Any]]:
+        """Run a batch of concurrency-safe calls in parallel; empties the batch."""
+        if len(batch) == 1:
+            done = [await execute(batch[0])]
+        elif batch:
+            done = list(await asyncio.gather(*(execute(fc) for fc in batch)))
+        else:
+            done = []
+        batch.clear()
+        return done
+
     stop_reason = "loop_limit"
     answer = ""
     rounds = 0
-    for rounds in range(1, MAX_TOOL_ROUNDS + 1):
+    for rounds in range(1, MAX_TOOL_ROUNDS + 1):  # noqa: B007 - used after the loop
         result: Any = None
         async for kind, payload in llm.respond_stream(SYSTEM_PROMPT, items, tools):
             if kind == "delta":
@@ -95,6 +109,10 @@ async def run_agent_events(principal: Principal, session_id: str, user_message: 
             stop_reason = "answered"
             break
 
+        # This round ended in tool calls, so any text streamed above was
+        # preamble, not the answer - tell consumers to clear it.
+        yield {"type": "text_reset"}
+
         # Echo the model's output items back verbatim — reasoning items must
         # accompany their function_calls when threading state manually.
         items.extend(o.model_dump(exclude_none=True) for o in result.output)
@@ -107,7 +125,8 @@ async def run_agent_events(principal: Principal, session_id: str, user_message: 
             key = (fc.name, fc.arguments or "")
             planned.append((fc, key in seen_calls))
             seen_calls.add(key)
-            yield {"type": "tool_start", "tool": fc.name, "args": fc.arguments}
+            yield {"type": "tool_start", "call_id": fc.call_id,
+                   "tool": fc.name, "args": fc.arguments}
 
         _DUP = (
             "Duplicate call: this exact tool call already ran this turn. "
@@ -116,31 +135,18 @@ async def run_agent_events(principal: Principal, session_id: str, user_message: 
 
         def _tool_end(fc: Any, outcome: Any) -> dict[str, Any]:
             if outcome is None:  # duplicate
-                return {"type": "tool_end", "tool": fc.name, "decision": "duplicate",
-                        "latency_ms": 0.0, "is_error": False, "sql": None}
-            return {"type": "tool_end", "tool": fc.name, "decision": outcome.decision,
-                    "latency_ms": outcome.latency_ms, "is_error": outcome.is_error,
-                    "sql": outcome.sql}
-
-        async def execute(fc: Any) -> tuple[Any, Any]:
-            return fc, await registry.dispatch(principal, fc.name, fc.arguments)
+                return {"type": "tool_end", "call_id": fc.call_id, "tool": fc.name,
+                        "decision": "duplicate", "latency_ms": 0.0, "is_error": False, "sql": None}
+            return {"type": "tool_end", "call_id": fc.call_id, "tool": fc.name,
+                    "decision": outcome.decision, "latency_ms": outcome.latency_ms,
+                    "is_error": outcome.is_error, "sql": outcome.sql}
 
         executed: list[tuple[Any, Any]] = []  # (call, outcome | None for duplicate)
         batch: list[Any] = []
 
-        async def flush_batch() -> list[tuple[Any, Any]]:
-            if len(batch) == 1:
-                done = [await execute(batch[0])]
-            elif batch:
-                done = list(await asyncio.gather(*(execute(fc) for fc in batch)))
-            else:
-                done = []
-            batch.clear()
-            return done
-
         for fc, is_dup in planned:
             if is_dup:
-                for pair in await flush_batch():
+                for pair in await flush(batch):
                     executed.append(pair)
                     yield _tool_end(*pair)
                 executed.append((fc, None))
@@ -148,13 +154,13 @@ async def run_agent_events(principal: Principal, session_id: str, user_message: 
             elif registry.meta(fc.name).concurrency_safe:
                 batch.append(fc)
             else:
-                for pair in await flush_batch():
+                for pair in await flush(batch):
                     executed.append(pair)
                     yield _tool_end(*pair)
                 pair = await execute(fc)
                 executed.append(pair)
                 yield _tool_end(*pair)
-        for pair in await flush_batch():
+        for pair in await flush(batch):
             executed.append(pair)
             yield _tool_end(*pair)
 
@@ -188,7 +194,6 @@ async def run_agent_events(principal: Principal, session_id: str, user_message: 
 
     await memory.append_turn(principal.sub, session_id, {"role": "user", "content": contextualised})
     await memory.append_turn(principal.sub, session_id, {"role": "assistant", "content": answer})
-    await memory.aclose()
 
     yield {
         "type": "final",

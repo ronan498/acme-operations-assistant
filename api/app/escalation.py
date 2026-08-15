@@ -61,23 +61,27 @@ async def run_skill(principal: Principal, args: dict[str, Any]) -> tuple[str, bo
     """Returns (content_json, is_error) for the outer agent to present."""
     from .registry import registry  # function-level import breaks the module cycle
 
+    async def dispatch(tool: str, payload: dict[str, Any]):
+        # the frontmatter's allowed_tools is a contract, enforced not implied
+        if tool not in SKILL.allowed_tools:
+            raise ValueError(f"skill tried undeclared tool {tool!r}")
+        return await registry.dispatch(principal, tool, json.dumps(payload))
+
     customer_name = str(args.get("customer_name", "")).strip()
     persist = bool(args.get("persist_next_action", False))
     timings: dict[str, float] = {}
 
     # ── stage 1: gather (deterministic, no LLM) ──
     t0 = time.perf_counter()
-    profile_out = await registry.dispatch(
-        principal, "get_customer_profile", json.dumps({"customer_name": customer_name})
-    )
+    profile_out = await dispatch("get_customer_profile", {"customer_name": customer_name})
     profile = json.loads(profile_out.content) if not profile_out.is_error else None
     if profile is None or not profile.get("found"):
         # not found / ambiguous: pass the tool's own payload straight through
         return profile_out.content, profile_out.is_error
 
-    issues_out = await registry.dispatch(
-        principal, "get_open_issues", json.dumps({"customer_name": profile["name"]})
-    )
+    issues_out = await dispatch("get_open_issues", {"customer_name": profile["name"]})
+    if issues_out.is_error:
+        return issues_out.content, True  # pass the tool's own message through
     issues = json.loads(issues_out.content)
     open_issues = issues.get("issues", [])
 
@@ -85,11 +89,7 @@ async def run_skill(principal: Principal, args: dict[str, Any]) -> tuple[str, bo
     if open_issues:
         outs = await asyncio.gather(
             *(
-                registry.dispatch(
-                    principal,
-                    "summarise_issue_history",
-                    json.dumps({"issue_id": i["issue_id"]}),
-                )
+                dispatch("summarise_issue_history", {"issue_id": i["issue_id"]})
                 for i in open_issues[:MAX_HISTORIES]
             )
         )
@@ -114,7 +114,8 @@ async def run_skill(principal: Principal, args: dict[str, Any]) -> tuple[str, bo
     except ValidationError as exc:
         reason_input.append({"role": "assistant", "content": result.output_text})
         reason_input.append(
-            {"role": "user", "content": f"Your output failed validation: {exc}. Emit corrected JSON only."}
+            {"role": "user",
+             "content": f"Your output failed validation: {exc}. Emit corrected JSON only."}
         )
         repair = await llm.respond(
             SKILL.body, reason_input, tools=[],
@@ -129,14 +130,14 @@ async def run_skill(principal: Principal, args: dict[str, Any]) -> tuple[str, bo
     persisted: dict[str, Any] = {"requested": persist}
     if persist and open_issues:
         target = open_issues[0]  # riskiest: list arrives priority-ordered
-        out = await registry.dispatch(
-            principal,
+        out = await dispatch(
             "create_next_action",
-            json.dumps({"issue_id": target["issue_id"], "action": summary.recommended_next_action}),
+            {"issue_id": target["issue_id"], "action": summary.recommended_next_action},
         )
-        persisted.update(
-            {"outcome": "denied" if out.decision == "deny" else "created", "detail": out.content[:300]}
-        )
+        outcome_label = {"deny": "denied", "allow": "created"}.get(out.decision, "failed")
+        if outcome_label == "created" and out.is_error:
+            outcome_label = "failed"  # an errored write must never be reported as created
+        persisted.update({"outcome": outcome_label, "detail": out.content[:300]})
     elif persist:
         persisted["outcome"] = "skipped_no_open_issues"
 

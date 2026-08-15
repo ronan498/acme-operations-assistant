@@ -7,7 +7,8 @@ nothing else in the system opens a connection to business tables.
 Every payload carries "_sql": the exact statements executed (parameters
 shown as $n placeholders; values travel separately and are visible in the
 tool args). The registry strips "_sql" before the model sees the payload -
-it exists for the UI and the audit story, not for the model.
+it exists for the UI and the per-call tool log, not for the model
+(latency and decisions live in Phoenix spans and audit_log).
 
 AuthZ note: this server trusts the api (it is unreachable from the host -
 no published ports). Role enforcement happens in the api's tool registry
@@ -41,6 +42,12 @@ async def pool() -> asyncpg.Pool:
 
 def _compact(sql: str) -> str:
     return " ".join(sql.split())
+
+
+def _like_escape(value: str) -> str:
+    """Escape LIKE metacharacters so user input can never widen the match:
+    '%' would match every customer, '_' any single character."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _parse_uuid(value: str) -> str | None:
@@ -126,7 +133,7 @@ SQL_UPDATE_ACTION = """
 async def _resolve_customer(customer_name: str) -> tuple[dict[str, Any] | None, Any]:
     """Resolve a customer name to a single row, or an ambiguity/not-found payload."""
     p = await pool()
-    rows = await p.fetch(SQL_RESOLVE_CUSTOMER, customer_name.strip())
+    rows = await p.fetch(SQL_RESOLVE_CUSTOMER, _like_escape(customer_name.strip()))
     exact = [r for r in rows if r["name"].lower() == customer_name.strip().lower()]
     if len(exact) == 1:
         rows = exact
@@ -154,7 +161,7 @@ async def get_customer_profile(customer_name: str) -> dict[str, Any]:
     customer, returns the candidate list instead - ask the user which one
     they mean before proceeding."""
     p = await pool()
-    rows = await p.fetch(SQL_CUSTOMER_PROFILE, customer_name.strip())
+    rows = await p.fetch(SQL_CUSTOMER_PROFILE, _like_escape(customer_name.strip()))
 
     # exact (case-insensitive) match wins outright even when a substring
     # search would be ambiguous - "Northwind Logistics" must not trip over
@@ -275,8 +282,9 @@ async def add_issue_update(issue_id: str, body: str, actor: str) -> dict[str, An
     if not body.strip():
         return {"ok": False, "message": "Update body must not be empty."}
     p = await pool()
-    row = await p.fetchrow(SQL_INSERT_UPDATE, iid, actor, body.strip())
-    if row is None:
+    try:
+        row = await p.fetchrow(SQL_INSERT_UPDATE, iid, actor, body.strip())
+    except asyncpg.ForeignKeyViolationError:
         return {"ok": False, "message": f"No issue with id {issue_id}."}
     return {
         "_sql": [_compact(SQL_INSERT_UPDATE)],
@@ -297,7 +305,10 @@ async def create_next_action(issue_id: str, action: str, actor: str) -> dict[str
     if not action.strip():
         return {"ok": False, "message": "Action text must not be empty."}
     p = await pool()
-    row = await p.fetchrow(SQL_INSERT_ACTION, iid, action.strip(), actor)
+    try:
+        row = await p.fetchrow(SQL_INSERT_ACTION, iid, action.strip(), actor)
+    except asyncpg.ForeignKeyViolationError:
+        return {"ok": False, "message": f"No issue with id {issue_id}."}
     return {
         "_sql": [_compact(SQL_INSERT_ACTION)],
         "ok": True,

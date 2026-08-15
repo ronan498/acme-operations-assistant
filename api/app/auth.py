@@ -63,7 +63,8 @@ async def get_principal(
         )
     except jwt.PyJWTError as exc:
         # Type only, never the message: token contents must not leak into responses
-        raise HTTPException(status_code=401, detail=f"invalid token ({type(exc).__name__})") from exc
+        detail = f"invalid token ({type(exc).__name__})"
+        raise HTTPException(status_code=401, detail=detail) from exc
 
     roles = frozenset(claims.get("realm_access", {}).get("roles", [])) & KNOWN_ROLES
     return Principal(

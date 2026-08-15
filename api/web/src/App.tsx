@@ -43,6 +43,7 @@ const ROLE_STYLE: Record<string, string> = {
 };
 
 type LiveTool = {
+  call_id?: string;
   tool: string;
   args: string;
   running: boolean;
@@ -140,8 +141,8 @@ function MetaLine({ resp, onCopyTrace, copied }: { resp: ChatResponse; onCopyTra
     <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-fog-500">
       <span>{resp.model}</span>
       <span>{resp.rounds} {resp.rounds === 1 ? "round" : "rounds"}</span>
-      <span>{resp.usage.input_tokens.toLocaleString()} in / {resp.usage.output_tokens.toLocaleString()} out</span>
-      {resp.usage.cached_tokens > 0 && <span className="text-ok">{resp.usage.cached_tokens.toLocaleString()} cached</span>}
+      <span>{(resp.usage?.input_tokens ?? 0).toLocaleString()} in / {(resp.usage?.output_tokens ?? 0).toLocaleString()} out</span>
+      {(resp.usage?.cached_tokens ?? 0) > 0 && <span className="text-ok">{resp.usage.cached_tokens.toLocaleString()} cached</span>}
       {resp.est_cost_usd != null && <span>${resp.est_cost_usd.toFixed(4)}</span>}
       {resp.trace_id && (
         <span className="inline-flex items-center gap-1.5">
@@ -318,14 +319,19 @@ export default function App() {
         setPhase("login");
         return;
       }
+      let toolsRan = false;
       try {
         await streamChat(token, message, sessionId, (event) => {
           if (event.type === "tool_start") {
-            setLiveTools((prev) => [...prev, { tool: event.tool, args: event.args, running: true }]);
+            toolsRan = true;
+            setLiveTools((prev) => [
+              ...prev,
+              { call_id: event.call_id, tool: event.tool, args: event.args, running: true },
+            ]);
           } else if (event.type === "tool_end") {
             setLiveTools((prev) => {
               const next = [...prev];
-              const i = next.findIndex((t) => t.running && t.tool === event.tool);
+              const i = next.findIndex((t) => t.running && t.call_id === event.call_id);
               if (i >= 0)
                 next[i] = { ...next[i], running: false, decision: event.decision,
                             latency_ms: event.latency_ms, sql: event.sql };
@@ -333,13 +339,17 @@ export default function App() {
             });
           } else if (event.type === "delta") {
             setLiveText((prev) => prev + event.text);
+          } else if (event.type === "text_reset") {
+            setLiveText(""); // that text was pre-tool-call preamble, not the answer
           } else if (event.type === "final") {
             finish(event as unknown as ChatResponse);
           }
         });
       } catch (streamErr) {
-        // transport hiccup: fall back to the plain request/response path once
-        console.warn("stream failed, falling back:", streamErr);
+        // Fall back to the plain path ONLY if no tool executed yet - replaying
+        // a turn whose writes already committed would duplicate side effects.
+        if (toolsRan) throw streamErr;
+        console.warn("stream failed before any tool ran, falling back:", streamErr);
         finish(await sendChat(token, message, sessionId));
       }
     } catch (err) {

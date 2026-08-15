@@ -71,7 +71,8 @@ def _skill_schema() -> dict[str, Any]:
                 "customer_name": {"type": "string", "description": "Customer to assess"},
                 "persist_next_action": {
                     "type": "boolean",
-                    "description": "true ONLY if the user explicitly asked to save/record the recommended action",
+                    "description": "true ONLY if the user explicitly asked to "
+                    "save/record the recommended action",
                 },
             },
         },

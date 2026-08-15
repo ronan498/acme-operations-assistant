@@ -48,5 +48,6 @@ def authorize(principal: Principal, tool: str) -> Decision:
         return Decision(True, f"{prefix}:role_{sorted(granted)[0]}")
     return Decision(
         False,
-        f"{prefix}:insufficient_role (requires one of {sorted(allowed)}, has {sorted(principal.roles)})",
+        f"{prefix}:insufficient_role "
+        f"(requires one of {sorted(allowed)}, has {sorted(principal.roles)})",
     )

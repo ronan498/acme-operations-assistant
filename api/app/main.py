@@ -1,20 +1,17 @@
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-import json
-
-from fastapi.responses import StreamingResponse
-
 from . import audit, readiness, telemetry
 from .agent import run_agent, run_agent_events
-from .costs import totals
 from .auth import Principal, get_principal
 from .config import settings
+from .costs import estimate_usd, totals
 from .policy import authorize
 
 
@@ -23,6 +20,9 @@ async def lifespan(_: FastAPI):
     telemetry.setup()
     yield
     await audit.close_pool()
+    from .memory import close_shared
+
+    await close_shared()
 
 
 app = FastAPI(
@@ -49,8 +49,8 @@ async def ready() -> JSONResponse:
             "status": "ready" if all_up else "degraded",
             "checks": checks,
             "models": {
-                "primary": settings.primary_model,
-                "fallbacks": settings.fallback_models.split(","),
+                "primary": settings.model_chain()[0],
+                "fallbacks": settings.model_chain()[1:],
             },
         },
     )
@@ -87,7 +87,7 @@ async def chat(
             raise HTTPException(
                 status_code=502, detail=f"model upstream error: {type(exc).__name__}: {exc}"
             ) from exc
-        cost = totals.add(result.model, result.usage)
+        cost = estimate_usd(result.model, result.usage)
         span.set_attributes(
             {
                 "llm.model": result.model,
@@ -130,7 +130,7 @@ async def chat_stream(
             try:
                 async for event in run_agent_events(principal, body.session_id, body.message):
                     if event["type"] == "final":
-                        cost = totals.add(event["model"], event["usage"])
+                        cost = estimate_usd(event["model"], event["usage"])
                         event = {**event, "est_cost_usd": cost,
                                  "trace_id": trace_id, "session_id": body.session_id}
                         span.set_attributes(
@@ -161,12 +161,6 @@ async def stats(principal: Principal = Depends(get_principal)) -> dict:
     return totals.snapshot()
 
 
-# The UI: a static Vite build served same-origin. Mounted last so every API
-# route above wins; anything else falls through to index.html.
-_static = Path(__file__).parent.parent / "static"
-if _static.is_dir():
-    app.mount("/", StaticFiles(directory=_static, html=True), name="ui")
-
 
 class AuthzCheck(BaseModel):
     tool: str
@@ -193,3 +187,10 @@ async def authz_check(
     if not decision.allow:
         raise HTTPException(status_code=403, detail=decision.reason)
     return {"tool": body.tool, "decision": "allow", "reason": decision.reason}
+
+# The UI: a static Vite build served same-origin. Mounted LAST - after every
+# route in this module - so API routes always win (a mount at "/" would
+# otherwise swallow anything registered after it); anything else falls through to index.html.
+_static = Path(__file__).parent.parent / "static"
+if _static.is_dir():
+    app.mount("/", StaticFiles(directory=_static, html=True), name="ui")

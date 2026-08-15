@@ -13,5 +13,11 @@ class Settings(BaseSettings):
     fallback_models: str = "gpt-5.5,gpt-5.4"
     phoenix_collector_endpoint: str = "http://phoenix:6006"
 
+    def model_chain(self) -> list[str]:
+        """primary + fallbacks, whitespace-stripped - the ONE place this is built."""
+        return [self.primary_model] + [
+            m.strip() for m in self.fallback_models.split(",") if m.strip()
+        ]
+
 
 settings = Settings()

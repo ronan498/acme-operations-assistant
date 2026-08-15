@@ -14,6 +14,7 @@ Compatible with the macOS system python (3.9).
 from __future__ import annotations
 
 import json
+import math
 import statistics
 import subprocess
 import sys
@@ -83,11 +84,18 @@ def psql(sql: str) -> list[str]:
     return [line for line in out.stdout.strip().splitlines() if line]
 
 
+_key_cache: list[str] = []
+
+
 def openai_key() -> str:
-    for line in (ROOT / ".env").read_text().splitlines():
-        if line.startswith("OPENAI_API_KEY="):
-            return line.split("=", 1)[1].strip().strip("\"'")
-    raise SystemExit("OPENAI_API_KEY not found in .env")
+    if not _key_cache:
+        for line in (ROOT / ".env").read_text().splitlines():
+            if line.startswith("OPENAI_API_KEY="):
+                _key_cache.append(line.split("=", 1)[1].strip().strip("\"'"))
+                break
+        else:
+            raise SystemExit("OPENAI_API_KEY not found in .env")
+    return _key_cache[0]
 
 
 def judge(question: str, answer: str) -> dict:
@@ -226,9 +234,13 @@ def main() -> None:
         "no_forbidden_tool": family_rate("no_forbidden_tool"),
         "reasonableness_pass": family_rate("reasonableness"),
         "reasonableness_mean": round(statistics.mean(scores), 2) if scores else None,
+        "reasonableness_ungraded": sum(
+            1 for r in results
+            if "reasonableness" in r["checks"] and r["checks"]["reasonableness"] is None
+        ),
         "audit_integrity": family_rate("audit_integrity"),
         "latency_p50_ms": round(statistics.median(lat)) if lat else None,
-        "latency_p95_ms": round(sorted(lat)[max(0, int(len(lat) * 0.95) - 1)]) if lat else None,
+        "latency_p95_ms": round(sorted(lat)[min(len(lat) - 1, max(0, math.ceil(len(lat) * 0.95) - 1))]) if lat else None,
         "total_cost_usd": round(sum(r["cost_usd"] for r in results), 4),
     }
 
