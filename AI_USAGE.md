@@ -15,7 +15,7 @@ security posture choice (fail-closed defaults, actor injection, RBAC placement).
 
 ## 2. How AI-generated code was reviewed, validated, and tested
 
-Primarily by execution, not by reading. Every phase ended in a gate that had to
+Primarily by execution, not by reading. Though I do glance over the code looking specifically for AI generated code weaknesses such as hardcoded values and poor fallbacks. Every phase ended in a gate that had to
 pass live: containers healthy, `/ready` green, real tokens through real
 Keycloak, denials landing in `audit_log`, the eval suite. Reading catches style;
 gates catch lies - the venv-shebang Dockerfile bug below read perfectly and
@@ -28,7 +28,7 @@ trusts nothing the agent reports about itself.
 Two standing rules did most of the work. First: **no version, tag, model id, or
 price from the model's memory** - everything pinned against a live source
 (Docker Hub, Quay, PyPI, OpenAI /v1/models, the live pricing page). This caught
-a 16-day-old mcp 2.0 release and the fictional-looking-but-real gpt-5.6 family.
+a 16-day-old mcp 2.0 release and the gpt-5.6 family.
 Second: **known seed data as ground truth** - the "7 open issues" bug below was
 visible only because the true answer (3) was designed into the data. Each catch
 is logged below with the wrong output and the fix, written at the moment it
