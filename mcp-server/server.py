@@ -1,10 +1,15 @@
 """Acme MCP tool server.
 
 Tool definitions live HERE, never in the agent: the api discovers them at
-runtime via list_tools (the §4.2 separation). The server owns all SQL —
+runtime via list_tools (the §4.2 separation). The server owns all SQL -
 nothing else in the system opens a connection to business tables.
 
-AuthZ note: this server trusts the api (it is unreachable from the host —
+Every payload carries "_sql": the exact statements executed (parameters
+shown as $n placeholders; values travel separately and are visible in the
+tool args). The registry strips "_sql" before the model sees the payload -
+it exists for the UI and the audit story, not for the model.
+
+AuthZ note: this server trusts the api (it is unreachable from the host -
 no published ports). Role enforcement happens in the api's tool registry
 before any call arrives here; the audit trail is written there too.
 """
@@ -34,31 +39,8 @@ async def pool() -> asyncpg.Pool:
     return _pool
 
 
-@mcp.custom_route("/health", methods=["GET"])
-async def health(_: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok"})
-
-
-async def _resolve_customer(customer_name: str) -> tuple[dict[str, Any] | None, Any]:
-    """Resolve a customer name to a single row, or an ambiguity/not-found payload."""
-    p = await pool()
-    rows = await p.fetch(
-        "SELECT id, name FROM customers WHERE lower(name) LIKE '%' || lower($1) || '%' ORDER BY name",
-        customer_name.strip(),
-    )
-    exact = [r for r in rows if r["name"].lower() == customer_name.strip().lower()]
-    if len(exact) == 1:
-        rows = exact
-    if not rows:
-        return {"found": False, "message": f"No customer matching '{customer_name}'."}, None
-    if len(rows) > 1:
-        return {
-            "found": False,
-            "ambiguous": True,
-            "candidates": [r["name"] for r in rows],
-            "message": "Multiple customers match — ask the user which one they mean.",
-        }, None
-    return None, rows[0]
+def _compact(sql: str) -> str:
+    return " ".join(sql.split())
 
 
 def _parse_uuid(value: str) -> str | None:
@@ -70,47 +52,132 @@ def _parse_uuid(value: str) -> str | None:
         return None
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
+# ── SQL: the single source for both execution and the "_sql" report ──
+
+SQL_RESOLVE_CUSTOMER = """
+    SELECT id, name FROM customers
+    WHERE lower(name) LIKE '%' || lower($1) || '%' ORDER BY name
+"""
+
+SQL_CUSTOMER_PROFILE = """
+    SELECT c.id, c.name, c.tier, c.industry, c.account_owner, c.created_at,
+           count(DISTINCT i.id) FILTER (WHERE i.status != 'resolved') AS open_issues,
+           max(GREATEST(i.opened_at, coalesce(u.created_at, i.opened_at))) AS last_activity
+    FROM customers c
+    LEFT JOIN issues i ON i.customer_id = c.id
+    LEFT JOIN issue_updates u ON u.issue_id = i.id
+    WHERE lower(c.name) LIKE '%' || lower($1) || '%'
+    GROUP BY c.id
+    ORDER BY c.name
+"""
+
+SQL_OPEN_ISSUES = """
+    SELECT i.id, i.title, i.status, i.priority, i.assigned_to, i.opened_at,
+           count(u.id) AS update_count, max(u.created_at) AS last_update_at
+    FROM issues i
+    LEFT JOIN issue_updates u ON u.issue_id = i.id
+    WHERE i.customer_id = $1 AND i.status != 'resolved'
+    GROUP BY i.id
+    ORDER BY array_position(ARRAY['critical','high','medium','low'], i.priority), i.opened_at
+"""
+
+SQL_ISSUE = """
+    SELECT i.*, c.name AS customer_name FROM issues i
+    JOIN customers c ON c.id = i.customer_id WHERE i.id = $1
+"""
+
+SQL_ISSUE_UPDATES = """
+    SELECT author, body, created_at FROM issue_updates WHERE issue_id = $1 ORDER BY created_at
+"""
+
+SQL_ISSUE_ACTIONS = """
+    SELECT id, action, status, created_by, created_at, updated_by, updated_at
+    FROM next_actions WHERE issue_id = $1 ORDER BY created_at
+"""
+
+SQL_INSERT_UPDATE = """
+    INSERT INTO issue_updates (id, issue_id, author, body, created_at)
+    VALUES (gen_random_uuid(), $1, $2, $3, now())
+    RETURNING id, created_at
+"""
+
+SQL_INSERT_ACTION = """
+    INSERT INTO next_actions (id, issue_id, action, status, created_by)
+    VALUES (gen_random_uuid(), $1, $2, 'proposed', $3)
+    RETURNING id, created_at
+"""
+
+SQL_UPDATE_ACTION = """
+    UPDATE next_actions
+    SET status = coalesce($2, status),
+        action = coalesce($3, action),
+        updated_by = $4,
+        updated_at = now()
+    WHERE id = $1
+    RETURNING id, action, status, updated_at
+"""
+
+
+async def _resolve_customer(customer_name: str) -> tuple[dict[str, Any] | None, Any]:
+    """Resolve a customer name to a single row, or an ambiguity/not-found payload."""
+    p = await pool()
+    rows = await p.fetch(SQL_RESOLVE_CUSTOMER, customer_name.strip())
+    exact = [r for r in rows if r["name"].lower() == customer_name.strip().lower()]
+    if len(exact) == 1:
+        rows = exact
+    if not rows:
+        return {
+            "_sql": [_compact(SQL_RESOLVE_CUSTOMER)],
+            "found": False,
+            "message": f"No customer matching '{customer_name}'.",
+        }, None
+    if len(rows) > 1:
+        return {
+            "_sql": [_compact(SQL_RESOLVE_CUSTOMER)],
+            "found": False,
+            "ambiguous": True,
+            "candidates": [r["name"] for r in rows],
+            "message": "Multiple customers match - ask the user which one they mean.",
+        }, None
+    return None, rows[0]
+
+
 @mcp.tool()
 async def get_customer_profile(customer_name: str) -> dict[str, Any]:
     """Retrieve a customer's profile by name: tier, industry, account owner,
     open-issue count and latest activity. If the name matches more than one
-    customer, returns the candidate list instead — ask the user which one
+    customer, returns the candidate list instead - ask the user which one
     they mean before proceeding."""
     p = await pool()
-    rows = await p.fetch(
-        """
-        SELECT c.id, c.name, c.tier, c.industry, c.account_owner, c.created_at,
-               count(DISTINCT i.id) FILTER (WHERE i.status != 'resolved') AS open_issues,
-               max(GREATEST(i.opened_at, coalesce(u.created_at, i.opened_at))) AS last_activity
-        FROM customers c
-        LEFT JOIN issues i ON i.customer_id = c.id
-        LEFT JOIN issue_updates u ON u.issue_id = i.id
-        WHERE lower(c.name) LIKE '%' || lower($1) || '%'
-        GROUP BY c.id
-        ORDER BY c.name
-        """,
-        customer_name.strip(),
-    )
+    rows = await p.fetch(SQL_CUSTOMER_PROFILE, customer_name.strip())
 
     # exact (case-insensitive) match wins outright even when a substring
-    # search would be ambiguous — "Northwind Logistics" must not trip over
+    # search would be ambiguous - "Northwind Logistics" must not trip over
     # "Northwind Retail Co."
     exact = [r for r in rows if r["name"].lower() == customer_name.strip().lower()]
     if len(exact) == 1:
         rows = exact
 
+    sql = [_compact(SQL_CUSTOMER_PROFILE)]
     if not rows:
-        return {"found": False, "message": f"No customer matching '{customer_name}'."}
+        return {"_sql": sql, "found": False, "message": f"No customer matching '{customer_name}'."}
     if len(rows) > 1:
         return {
+            "_sql": sql,
             "found": False,
             "ambiguous": True,
             "candidates": [r["name"] for r in rows],
-            "message": "Multiple customers match — ask the user which one they mean.",
+            "message": "Multiple customers match - ask the user which one they mean.",
         }
 
     r = rows[0]
     return {
+        "_sql": sql,
         "found": True,
         "customer_id": str(r["id"]),
         "name": r["name"],
@@ -132,19 +199,9 @@ async def get_open_issues(customer_name: str) -> dict[str, Any]:
     if err:
         return err
     p = await pool()
-    rows = await p.fetch(
-        """
-        SELECT i.id, i.title, i.status, i.priority, i.assigned_to, i.opened_at,
-               count(u.id) AS update_count, max(u.created_at) AS last_update_at
-        FROM issues i
-        LEFT JOIN issue_updates u ON u.issue_id = i.id
-        WHERE i.customer_id = $1 AND i.status != 'resolved'
-        GROUP BY i.id
-        ORDER BY array_position(ARRAY['critical','high','medium','low'], i.priority), i.opened_at
-        """,
-        customer["id"],
-    )
+    rows = await p.fetch(SQL_OPEN_ISSUES, customer["id"])
     return {
+        "_sql": [_compact(SQL_RESOLVE_CUSTOMER), _compact(SQL_OPEN_ISSUES)],
         "found": True,
         "customer": customer["name"],
         "open_issue_count": len(rows),
@@ -174,25 +231,13 @@ async def summarise_issue_history(issue_id: str) -> dict[str, Any]:
     if iid is None:
         return {"found": False, "message": f"'{issue_id}' is not a valid issue id."}
     p = await pool()
-    issue = await p.fetchrow(
-        """
-        SELECT i.*, c.name AS customer_name FROM issues i
-        JOIN customers c ON c.id = i.customer_id WHERE i.id = $1
-        """,
-        iid,
-    )
+    issue = await p.fetchrow(SQL_ISSUE, iid)
     if issue is None:
-        return {"found": False, "message": f"No issue with id {issue_id}."}
-    updates = await p.fetch(
-        "SELECT author, body, created_at FROM issue_updates WHERE issue_id = $1 ORDER BY created_at",
-        iid,
-    )
-    actions = await p.fetch(
-        "SELECT id, action, status, created_by, created_at, updated_by, updated_at "
-        "FROM next_actions WHERE issue_id = $1 ORDER BY created_at",
-        iid,
-    )
+        return {"_sql": [_compact(SQL_ISSUE)], "found": False, "message": f"No issue with id {issue_id}."}
+    updates = await p.fetch(SQL_ISSUE_UPDATES, iid)
+    actions = await p.fetch(SQL_ISSUE_ACTIONS, iid)
     return {
+        "_sql": [_compact(SQL_ISSUE), _compact(SQL_ISSUE_UPDATES), _compact(SQL_ISSUE_ACTIONS)],
         "found": True,
         "issue": {
             "issue_id": str(issue["id"]),
@@ -230,20 +275,16 @@ async def add_issue_update(issue_id: str, body: str, actor: str) -> dict[str, An
     if not body.strip():
         return {"ok": False, "message": "Update body must not be empty."}
     p = await pool()
-    row = await p.fetchrow(
-        """
-        INSERT INTO issue_updates (id, issue_id, author, body, created_at)
-        VALUES (gen_random_uuid(), $1, $2, $3, now())
-        RETURNING id, created_at
-        """,
-        iid,
-        actor,
-        body.strip(),
-    )
+    row = await p.fetchrow(SQL_INSERT_UPDATE, iid, actor, body.strip())
     if row is None:
         return {"ok": False, "message": f"No issue with id {issue_id}."}
-    return {"ok": True, "update_id": str(row["id"]), "author": actor,
-            "at": row["created_at"].isoformat()}
+    return {
+        "_sql": [_compact(SQL_INSERT_UPDATE)],
+        "ok": True,
+        "update_id": str(row["id"]),
+        "author": actor,
+        "at": row["created_at"].isoformat(),
+    }
 
 
 @mcp.tool()
@@ -256,18 +297,15 @@ async def create_next_action(issue_id: str, action: str, actor: str) -> dict[str
     if not action.strip():
         return {"ok": False, "message": "Action text must not be empty."}
     p = await pool()
-    row = await p.fetchrow(
-        """
-        INSERT INTO next_actions (id, issue_id, action, status, created_by)
-        VALUES (gen_random_uuid(), $1, $2, 'proposed', $3)
-        RETURNING id, created_at
-        """,
-        iid,
-        action.strip(),
-        actor,
-    )
-    return {"ok": True, "action_id": str(row["id"]), "status": "proposed",
-            "created_by": actor, "at": row["created_at"].isoformat()}
+    row = await p.fetchrow(SQL_INSERT_ACTION, iid, action.strip(), actor)
+    return {
+        "_sql": [_compact(SQL_INSERT_ACTION)],
+        "ok": True,
+        "action_id": str(row["id"]),
+        "status": "proposed",
+        "created_by": actor,
+        "at": row["created_at"].isoformat(),
+    }
 
 
 @mcp.tool()
@@ -286,25 +324,18 @@ async def update_next_action(
     if status is None and action_text is None:
         return {"ok": False, "message": "Nothing to update: provide status and/or action_text."}
     p = await pool()
-    row = await p.fetchrow(
-        """
-        UPDATE next_actions
-        SET status = coalesce($2, status),
-            action = coalesce($3, action),
-            updated_by = $4,
-            updated_at = now()
-        WHERE id = $1
-        RETURNING id, action, status, updated_at
-        """,
-        aid,
-        status,
-        action_text,
-        actor,
-    )
+    row = await p.fetchrow(SQL_UPDATE_ACTION, aid, status, action_text, actor)
     if row is None:
-        return {"ok": False, "message": f"No next action with id {action_id}."}
-    return {"ok": True, "action_id": str(row["id"]), "action": row["action"],
-            "status": row["status"], "updated_by": actor, "at": row["updated_at"].isoformat()}
+        return {"_sql": [_compact(SQL_UPDATE_ACTION)], "ok": False, "message": f"No next action with id {action_id}."}
+    return {
+        "_sql": [_compact(SQL_UPDATE_ACTION)],
+        "ok": True,
+        "action_id": str(row["id"]),
+        "action": row["action"],
+        "status": row["status"],
+        "updated_by": actor,
+        "at": row["updated_at"].isoformat(),
+    }
 
 
 if __name__ == "__main__":

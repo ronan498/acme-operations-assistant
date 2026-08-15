@@ -1,6 +1,8 @@
 import {
   ArrowClockwise,
+  CaretRight,
   Copy,
+  Database,
   PaperPlaneRight,
   ShieldCheck,
   ShieldSlash,
@@ -10,7 +12,14 @@ import {
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { useEffect, useRef, useState } from "react";
-import { sendChat, fetchMe, type ChatResponse, type Me, type ToolCall } from "./api";
+import {
+  fetchMe,
+  sendChat,
+  streamChat,
+  type ChatResponse,
+  type Me,
+  type ToolCall,
+} from "./api";
 import { beginLogin, clearTokens, completeLoginFromUrl, getAccessToken } from "./auth";
 
 const PHOENIX_URL = "http://localhost:6006";
@@ -33,6 +42,15 @@ const ROLE_STYLE: Record<string, string> = {
   sales_user: "text-fog-500 border-ink-700 bg-ink-850",
 };
 
+type LiveTool = {
+  tool: string;
+  args: string;
+  running: boolean;
+  decision?: ToolCall["decision"];
+  latency_ms?: number;
+  sql?: string[] | null;
+};
+
 type Turn =
   | { kind: "user"; text: string }
   | { kind: "assistant"; resp: ChatResponse }
@@ -40,6 +58,14 @@ type Turn =
 
 function renderMarkdown(text: string): string {
   return DOMPurify.sanitize(marked.parse(text, { async: false }) as string);
+}
+
+function prettyArgs(args: string): string {
+  try {
+    return JSON.stringify(JSON.parse(args || "{}"), null, 2);
+  } catch {
+    return args;
+  }
 }
 
 function RoleChip({ role }: { role: string }) {
@@ -50,38 +76,85 @@ function RoleChip({ role }: { role: string }) {
   );
 }
 
-function ToolChip({ call }: { call: ToolCall }) {
+/** One tool invocation: chip row, expandable to arguments + executed SQL. */
+function ToolRow({ call }: { call: LiveTool }) {
+  const [open, setOpen] = useState(false);
+  const decision = call.running ? "running" : (call.decision ?? "error");
   const styles =
-    call.decision === "allow"
-      ? "border-ok/30 bg-ok/10 text-ok"
-      : call.decision === "deny"
-        ? "border-bad/40 bg-bad/10 text-bad"
-        : "border-ink-700 bg-ink-800 text-fog-500";
-  const Icon = call.decision === "deny" ? ShieldSlash : ShieldCheck;
+    decision === "running"
+      ? "border-ink-500 bg-ink-800 text-fog-300"
+      : decision === "allow"
+        ? "border-ok/30 bg-ok/10 text-ok"
+        : decision === "deny"
+          ? "border-bad/40 bg-bad/10 text-bad"
+          : "border-ink-700 bg-ink-800 text-fog-500";
+  const Icon = decision === "deny" ? ShieldSlash : ShieldCheck;
+  const hasDetail = Boolean(call.args && call.args !== "{}") || Boolean(call.sql?.length);
+
   return (
-    <span
-      title={call.args}
-      className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] ${styles}`}
-    >
-      <Icon size={12} weight="bold" />
-      {call.tool}
-      <span className="opacity-60">{call.decision === "duplicate" ? "dup" : `${Math.round(call.latency_ms)}ms`}</span>
-    </span>
+    <div className="min-w-0">
+      <button
+        onClick={() => hasDetail && setOpen(!open)}
+        className={`inline-flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11px] ${styles} ${hasDetail ? "cursor-pointer" : "cursor-default"}`}
+        aria-expanded={open}
+      >
+        {hasDetail && (
+          <CaretRight size={10} weight="bold" className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
+        )}
+        {call.running ? (
+          <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent" aria-label="running" />
+        ) : (
+          <Icon size={12} weight="bold" className="shrink-0" />
+        )}
+        <span className="truncate">{call.tool}</span>
+        <span className="shrink-0 opacity-60">
+          {call.running ? "running" : decision === "duplicate" ? "dup" : `${Math.round(call.latency_ms ?? 0)}ms`}
+        </span>
+      </button>
+      {open && (
+        <div className="mt-1.5 space-y-2 rounded-md border border-ink-700 bg-ink-900 p-3">
+          {call.args && call.args !== "{}" && (
+            <div>
+              <p className="mb-1 font-mono text-[10px] uppercase tracking-wide text-fog-500">arguments</p>
+              <pre className="overflow-x-auto font-mono text-[11px] leading-relaxed text-fog-300">{prettyArgs(call.args)}</pre>
+            </div>
+          )}
+          {call.sql?.length ? (
+            <div>
+              <p className="mb-1 flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-fog-500">
+                <Database size={11} /> sql executed
+              </p>
+              {call.sql.map((stmt, i) => (
+                <pre key={i} className="mb-1 overflow-x-auto whitespace-pre-wrap rounded bg-ink-950 p-2 font-mono text-[11px] leading-relaxed text-fog-300">{stmt}</pre>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
   );
 }
 
-function Thinking({ startedAt }: { startedAt: number }) {
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setElapsed((Date.now() - startedAt) / 1000), 100);
-    return () => clearInterval(id);
-  }, [startedAt]);
+function MetaLine({ resp, onCopyTrace, copied }: { resp: ChatResponse; onCopyTrace: () => void; copied: boolean }) {
   return (
-    <div className="space-y-2.5 py-1" aria-label="assistant is reasoning">
-      <div className="shimmer h-3.5 w-3/5 rounded" />
-      <div className="shimmer h-3.5 w-2/5 rounded" />
-      <p className="font-mono text-[11px] text-fog-500">reasoning and calling tools · {elapsed.toFixed(1)}s</p>
-    </div>
+    <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-fog-500">
+      <span>{resp.model}</span>
+      <span>{resp.rounds} {resp.rounds === 1 ? "round" : "rounds"}</span>
+      <span>{resp.usage.input_tokens.toLocaleString()} in / {resp.usage.output_tokens.toLocaleString()} out</span>
+      {resp.usage.cached_tokens > 0 && <span className="text-ok">{resp.usage.cached_tokens.toLocaleString()} cached</span>}
+      {resp.est_cost_usd != null && <span>${resp.est_cost_usd.toFixed(4)}</span>}
+      {resp.trace_id && (
+        <span className="inline-flex items-center gap-1.5">
+          <a href={PHOENIX_URL} target="_blank" rel="noreferrer" className="underline decoration-ink-700 underline-offset-2 hover:text-fog-300">
+            trace
+          </a>
+          <button onClick={onCopyTrace} title={resp.trace_id} className="text-fog-500 hover:text-fog-300" aria-label="copy trace id">
+            <Copy size={12} />
+          </button>
+          {copied && <span className="text-ok">copied</span>}
+        </span>
+      )}
+    </p>
   );
 }
 
@@ -95,31 +168,47 @@ function AssistantTurn({ resp }: { resp: ChatResponse }) {
   };
   return (
     <div className="space-y-3">
-      <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(resp.answer) }} />
       {resp.tool_calls.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {resp.tool_calls.map((call, i) => (
-            <ToolChip key={i} call={call} />
+            <ToolRow key={i} call={{ ...call, running: false }} />
           ))}
         </div>
       )}
-      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-fog-500">
-        <span>{resp.model}</span>
-        <span>{resp.rounds} {resp.rounds === 1 ? "round" : "rounds"}</span>
-        <span>{resp.usage.input_tokens.toLocaleString()} in / {resp.usage.output_tokens.toLocaleString()} out</span>
-        {resp.usage.cached_tokens > 0 && <span className="text-ok">{resp.usage.cached_tokens.toLocaleString()} cached</span>}
-        {resp.est_cost_usd != null && <span>${resp.est_cost_usd.toFixed(4)}</span>}
-        {resp.trace_id && (
-          <span className="inline-flex items-center gap-1.5">
-            <a href={PHOENIX_URL} target="_blank" rel="noreferrer" className="underline decoration-ink-700 underline-offset-2 hover:text-fog-300">
-              trace
-            </a>
-            <button onClick={copyTrace} title={resp.trace_id} className="text-fog-500 hover:text-fog-300" aria-label="copy trace id">
-              <Copy size={12} />
-            </button>
-            {copied && <span className="text-ok">copied</span>}
-          </span>
-        )}
+      <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(resp.answer) }} />
+      <MetaLine resp={resp} onCopyTrace={copyTrace} copied={copied} />
+    </div>
+  );
+}
+
+/** The in-flight turn: live tool rows appear as the agent works, then the
+ * answer streams in token by token. */
+function LiveTurn({ tools, text, startedAt }: { tools: LiveTool[]; text: string; startedAt: number }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setElapsed((Date.now() - startedAt) / 1000), 100);
+    return () => clearInterval(id);
+  }, [startedAt]);
+
+  return (
+    <div className="space-y-3" aria-live="polite">
+      {tools.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {tools.map((call, i) => (
+            <ToolRow key={i} call={call} />
+          ))}
+        </div>
+      )}
+      {text ? (
+        <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />
+      ) : (
+        <div className="space-y-2.5 py-1">
+          <div className="shimmer h-3.5 w-3/5 rounded" />
+          <div className="shimmer h-3.5 w-2/5 rounded" />
+        </div>
+      )}
+      <p className="font-mono text-[11px] text-fog-500">
+        {text ? "writing" : tools.some((t) => t.running) ? "calling tools" : "reasoning"} · {elapsed.toFixed(1)}s
       </p>
     </div>
   );
@@ -185,6 +274,8 @@ export default function App() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState<number | null>(null); // startedAt ms
+  const [liveTools, setLiveTools] = useState<LiveTool[]>([]);
+  const [liveText, setLiveText] = useState("");
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
   const [sessionCost, setSessionCost] = useState(0);
   const endRef = useRef<HTMLDivElement>(null);
@@ -206,7 +297,12 @@ export default function App() {
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns, sending]);
+  }, [turns, sending, liveTools, liveText]);
+
+  const finish = (resp: ChatResponse) => {
+    setSessionCost((c) => c + (resp.est_cost_usd ?? 0));
+    setTurns((t) => [...t, { kind: "assistant", resp }]);
+  };
 
   const ask = async (text: string) => {
     const message = text.trim();
@@ -214,19 +310,44 @@ export default function App() {
     setInput("");
     setTurns((t) => [...t, { kind: "user", text: message }]);
     setSending(Date.now());
+    setLiveTools([]);
+    setLiveText("");
     try {
       const token = await getAccessToken();
       if (!token) {
         setPhase("login");
         return;
       }
-      const resp = await sendChat(token, message, sessionId);
-      setSessionCost((c) => c + (resp.est_cost_usd ?? 0));
-      setTurns((t) => [...t, { kind: "assistant", resp }]);
+      try {
+        await streamChat(token, message, sessionId, (event) => {
+          if (event.type === "tool_start") {
+            setLiveTools((prev) => [...prev, { tool: event.tool, args: event.args, running: true }]);
+          } else if (event.type === "tool_end") {
+            setLiveTools((prev) => {
+              const next = [...prev];
+              const i = next.findIndex((t) => t.running && t.tool === event.tool);
+              if (i >= 0)
+                next[i] = { ...next[i], running: false, decision: event.decision,
+                            latency_ms: event.latency_ms, sql: event.sql };
+              return next;
+            });
+          } else if (event.type === "delta") {
+            setLiveText((prev) => prev + event.text);
+          } else if (event.type === "final") {
+            finish(event as unknown as ChatResponse);
+          }
+        });
+      } catch (streamErr) {
+        // transport hiccup: fall back to the plain request/response path once
+        console.warn("stream failed, falling back:", streamErr);
+        finish(await sendChat(token, message, sessionId));
+      }
     } catch (err) {
       setTurns((t) => [...t, { kind: "error", text: err instanceof Error ? err.message : String(err) }]);
     } finally {
       setSending(null);
+      setLiveTools([]);
+      setLiveText("");
     }
   };
 
@@ -310,7 +431,7 @@ export default function App() {
                 </div>
               ),
             )}
-            {sending && <Thinking startedAt={sending} />}
+            {sending && <LiveTurn tools={liveTools} text={liveText} startedAt={sending} />}
             <div ref={endRef} />
           </div>
         )}

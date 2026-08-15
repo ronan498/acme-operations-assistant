@@ -101,6 +101,78 @@ class LLMService:
         base = min(BASE_DELAY_S * (2 ** (attempt - 1)), MAX_DELAY_S)
         return base + random.random() * 0.25 * base
 
+    @staticmethod
+    def _result_from_response(resp: Any) -> LLMResult:
+        usage: dict[str, int] = {}
+        if resp.usage:
+            details = resp.usage.input_tokens_details
+            usage = {
+                "input_tokens": resp.usage.input_tokens,
+                "output_tokens": resp.usage.output_tokens,
+                "cached_tokens": details.cached_tokens if details else 0,
+            }
+        return LLMResult(
+            output=list(resp.output),
+            output_text=resp.output_text or "",
+            model=resp.model,
+            usage=usage,
+        )
+
+    async def respond_stream(
+        self,
+        instructions: str,
+        input_items: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ):
+        """Yields ("delta", text) as answer tokens arrive, then ("done", LLMResult).
+
+        Retries/fallback apply to call INITIATION (same taxonomy as respond);
+        a failure after streaming begins surfaces to the caller - replaying a
+        half-consumed stream would double tool side effects.
+        """
+        state = FallbackState(
+            models=[settings.primary_model]
+            + [m.strip() for m in settings.fallback_models.split(",") if m.strip()]
+        )
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                kwargs: dict[str, Any] = {
+                    "model": state.model,
+                    "instructions": instructions,
+                    "input": input_items,
+                    "stream": True,
+                }
+                if tools:
+                    kwargs["tools"] = tools
+                stream = await self.client.responses.create(**kwargs)
+                break
+            except (RateLimitError, APITimeoutError, APIConnectionError) as exc:
+                if (getattr(exc, "code", None) or "") in NEVER_RETRY_CODES:
+                    raise
+                if state.on_capacity_error() == "exhausted":
+                    raise
+                retry_after = None
+                if isinstance(exc, RateLimitError):
+                    retry_after = (exc.response.headers or {}).get("retry-after")
+                await asyncio.sleep(self._delay(attempt, retry_after))
+            except APIStatusError as exc:
+                if exc.status_code < 500 or state.on_capacity_error() == "exhausted":
+                    raise
+                await asyncio.sleep(self._delay(attempt, None))
+
+        final = None
+        async for event in stream:
+            kind = getattr(event, "type", "")
+            if kind == "response.output_text.delta":
+                yield ("delta", event.delta)
+            elif kind == "response.completed":
+                final = event.response
+        if final is None:
+            raise RuntimeError("stream ended without response.completed")
+        yield ("done", self._result_from_response(final))
+
     async def respond(
         self,
         instructions: str,
@@ -133,21 +205,7 @@ class LLMService:
                         }
                     }
                 resp = await self.client.responses.create(**kwargs)
-
-                usage: dict[str, int] = {}
-                if resp.usage:
-                    details = resp.usage.input_tokens_details
-                    usage = {
-                        "input_tokens": resp.usage.input_tokens,
-                        "output_tokens": resp.usage.output_tokens,
-                        "cached_tokens": details.cached_tokens if details else 0,
-                    }
-                return LLMResult(
-                    output=list(resp.output),
-                    output_text=resp.output_text or "",
-                    model=resp.model,
-                    usage=usage,
-                )
+                return self._result_from_response(resp)
             except (RateLimitError, APITimeoutError, APIConnectionError) as exc:
                 # A 429 is not always transient: billing/quota exhaustion is a
                 # permanent condition wearing a rate-limit status code.

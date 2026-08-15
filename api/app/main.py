@@ -6,8 +6,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import json
+
+from fastapi.responses import StreamingResponse
+
 from . import audit, readiness, telemetry
-from .agent import run_agent
+from .agent import run_agent, run_agent_events
 from .costs import totals
 from .auth import Principal, get_principal
 from .config import settings
@@ -105,6 +109,50 @@ async def chat(
         "est_cost_usd": cost,
         "trace_id": trace_id,
     }
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    body: ChatRequest, principal: Principal = Depends(get_principal)
+) -> StreamingResponse:
+    """The agent as Server-Sent Events: tool_start / tool_end / delta / final.
+
+    Same auth, same loop, same audit as /chat — only the transport differs.
+    The eval harness stays on /chat; this exists for the console.
+    """
+
+    async def events():
+        with telemetry.tracer().start_as_current_span("chat") as span:
+            span.set_attributes(
+                {"user.name": principal.username, "session.id": body.session_id}
+            )
+            trace_id = telemetry.current_trace_id()
+            try:
+                async for event in run_agent_events(principal, body.session_id, body.message):
+                    if event["type"] == "final":
+                        cost = totals.add(event["model"], event["usage"])
+                        event = {**event, "est_cost_usd": cost,
+                                 "trace_id": trace_id, "session_id": body.session_id}
+                        span.set_attributes(
+                            {
+                                "llm.model": event["model"],
+                                "llm.rounds": event["rounds"],
+                                "llm.input_tokens": event["usage"].get("input_tokens", 0),
+                                "llm.output_tokens": event["usage"].get("output_tokens", 0),
+                                "llm.cached_tokens": event["usage"].get("cached_tokens", 0),
+                                **({"llm.est_cost_usd": cost} if cost is not None else {}),
+                            }
+                        )
+                    yield f"data: {json.dumps(event)}\n\n"
+            except Exception as exc:  # noqa: BLE001 — the stream must end cleanly
+                detail = f"model upstream error: {type(exc).__name__}: {exc}"
+                yield f"data: {json.dumps({'type': 'error', 'detail': detail})}\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/stats")

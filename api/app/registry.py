@@ -88,6 +88,7 @@ class ToolOutcome:
     is_error: bool
     decision: str          # allow | deny | error
     latency_ms: float
+    sql: list[str] | None = None  # executed statements, UI/audit only - never model context
 
 
 class ToolRegistry:
@@ -207,10 +208,21 @@ class ToolRegistry:
         text = "\n".join(
             block.text for block in result.content if getattr(block, "type", "") == "text"
         )
+        # "_sql" is for humans (UI, audit story) - strip it from model context
+        sql: list[str] | None = None
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict) and "_sql" in payload:
+                sql = payload.pop("_sql")
+                text = json.dumps(payload)
+        except (json.JSONDecodeError, TypeError):
+            pass
         cap = self.meta(tool).max_result_chars
         if len(text) > cap:
-            text = text[:cap] + f"\n[truncated at {cap} chars — narrow the query]"
-        return _done(text, bool(result.isError), "allow", args)
+            text = text[:cap] + f"\n[truncated at {cap} chars - narrow the query]"
+        outcome = _done(text, bool(result.isError), "allow", args)
+        outcome.sql = sql
+        return outcome
 
 
 registry = ToolRegistry()
