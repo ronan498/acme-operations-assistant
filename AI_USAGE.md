@@ -1,9 +1,5 @@
 # AI Usage Notes (§4.9)
 
-Tooling: Claude Code (Fable 5) as pair programmer, directed and reviewed by me.
-The four questions the brief asks, answered up front; the timestamped log below
-is the evidence, kept append-only from the first commit.
-
 ## 1. What was delegated to AI tools, and why
 
 Nearly all first-draft code: scaffolding, the Compose topology, the agent loop,
