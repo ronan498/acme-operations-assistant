@@ -34,3 +34,6 @@ seed: ## load schema + narrative seed data (idempotent, safe to re-run)
 
 eval: ## run the eval harness (10 cases) -> EVAL_RESULTS.md + evals/results.json
 	python3 scripts/run_eval.py evals/cases.json
+
+diagrams: ## render ARCHITECTURE.md mermaid blocks to docs/*.png (needs network for image pull)
+	python3 scripts/export_diagrams.py

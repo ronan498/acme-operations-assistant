@@ -1,12 +1,58 @@
-# AI Usage Log
-
-Append-only, kept from the first commit (§4.9 deliverable). Standing rule:
-every time an AI tool produces something wrong, the wrong output and the fix
-get pasted here in the moment — not reconstructed later.
+# AI Usage Notes (§4.9)
 
 Tooling: Claude Code (Fable 5) as pair programmer, directed and reviewed by me.
+The four questions the brief asks, answered up front; the timestamped log below
+is the evidence, kept append-only from the first commit.
+
+## 1. What was delegated to AI tools, and why
+
+Nearly all first-draft code: scaffolding, the Compose topology, the agent loop,
+the registry, SQL, the eval runner, the React console. Delegated because
+generation speed is the point of the tools. What was NOT delegated: the
+architecture itself (planned and argued before any code), phase gates and their
+pass criteria, model and pricing verification, scope decisions, and every
+security posture choice (fail-closed defaults, actor injection, RBAC placement).
+
+## 2. How AI-generated code was reviewed, validated, and tested
+
+Primarily by execution, not by reading. Every phase ended in a gate that had to
+pass live: containers healthy, `/ready` green, real tokens through real
+Keycloak, denials landing in `audit_log`, the eval suite. Reading catches style;
+gates catch lies — the venv-shebang Dockerfile bug below read perfectly and
+failed instantly. Unit tests cover the pure logic (policy ladder, fallback
+state machine, skill loader: 11 tests), and the eval harness deliberately
+trusts nothing the agent reports about itself.
+
+## 3. How errors and hallucinations were identified and corrected
+
+Two standing rules did most of the work. First: **no version, tag, model id, or
+price from the model's memory** — everything pinned against a live source
+(Docker Hub, Quay, PyPI, OpenAI /v1/models, the live pricing page). This caught
+a 16-day-old mcp 2.0 release and the fictional-looking-but-real gpt-5.6 family.
+Second: **known seed data as ground truth** — the "7 open issues" bug below was
+visible only because the true answer (3) was designed into the data. Each catch
+is logged below with the wrong output and the fix, written at the moment it
+happened.
+
+## 4. What I would not trust AI tools to do unsupervised in a client engagement
+
+- **Anything with a version number or a price** — training data is permanently
+  stale; the live source is the only authority.
+- **Security boundaries** — the AI happily wrote RBAC, but deciding WHERE it
+  lives (dispatch, not prompt) and that defaults fail closed is judgement a
+  client pays humans for.
+- **SQL that aggregates** — the same join fan-out bug appeared twice in one
+  build, once in my verification query and once in the AI's tool code. Grounding
+  checks against known data are non-negotiable.
+- **Declaring its own work correct** — the eval suite exists because
+  self-reported success is worthless; assertions read the database and the
+  audit trail, never the agent's claims.
+- **Client data.** This build used fictional seed data. Real engagement data
+  through a hosted LLM needs a DPA, retention terms, and client sign-off first.
 
 ---
+
+## The log (append-only, from first commit)
 
 **2026-08-13 23:08 — Phase 0 scaffold**
 Delegated: Compose file, service skeletons, Dockerfiles, readiness checks, Makefile.
