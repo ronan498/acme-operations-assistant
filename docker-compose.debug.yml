@@ -1,9 +1,11 @@
 # Opt-in override: publishes Postgres to the host for GUI inspection.
 # NOT loaded by default - the data plane stays port-free in the normal stack.
 #
-#   make db-expose   -> postgres reachable at 127.0.0.1:5432
+#   make db-expose   -> postgres reachable at 127.0.0.1:5433
 #   make db-hide     -> back to internal-only
+#
+# Host port 5433 because 5432 is typically taken (vernias_db holds it here).
 services:
   postgres:
     ports:
-      - "127.0.0.1:5432:5432" # localhost only, never 0.0.0.0
+      - "127.0.0.1:5433:5432" # localhost only, never 0.0.0.0

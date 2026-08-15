@@ -3,9 +3,9 @@
 db: ## interactive psql shell inside the postgres container
 	docker compose exec postgres psql -U acme -d acme
 
-db-expose: ## publish postgres on 127.0.0.1:5432 for GUI tools (TablePlus/DBeaver/etc.)
+db-expose: ## publish postgres on 127.0.0.1:5433 for GUI tools (TablePlus/DBeaver/etc.)
 	docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d postgres
-	@echo "postgres -> 127.0.0.1:5432 · db=acme · user=acme · password=acme_dev_password"
+	@echo "postgres -> 127.0.0.1:5433 · db=acme · user=acme · password=acme_dev_password"
 
 db-hide: ## remove the published port again (back to internal-only)
 	docker compose up -d postgres
