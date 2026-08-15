@@ -1,4 +1,15 @@
-.PHONY: up down logs ps ready test lint seed eval
+.PHONY: up down logs ps ready test lint seed eval db db-expose db-hide
+
+db: ## interactive psql shell inside the postgres container
+	docker compose exec postgres psql -U acme -d acme
+
+db-expose: ## publish postgres on 127.0.0.1:5432 for GUI tools (TablePlus/DBeaver/etc.)
+	docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d postgres
+	@echo "postgres -> 127.0.0.1:5432 · db=acme · user=acme · password=acme_dev_password"
+
+db-hide: ## remove the published port again (back to internal-only)
+	docker compose up -d postgres
+	@echo "postgres is internal-only again"
 
 up: ## build and start all six services
 	docker compose up -d --build
