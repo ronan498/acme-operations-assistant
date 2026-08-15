@@ -1,6 +1,5 @@
-e
 
-# Architecture — Acme Operations Agentic Assistant
+# Architecture - Acme Operations Agentic Assistant
 
 Proposed design for the EY Applied AI Engineer case study. Stack: Python/FastAPI, OpenAI, Docker Compose, Keycloak, PostgreSQL, Redis, MCP, Arize Phoenix.
 
@@ -10,18 +9,18 @@ Four views: system containers, request lifecycle, tool authorization, and the Sk
 
 ## 1. System containers and data flow
 
-Everything runs locally under `docker compose up`. **The OpenAI call is the only egress** — no other traffic leaves the machine, which is the whole security story in one sentence.
+Everything runs locally under `docker compose up`. **The OpenAI call is the only egress** - no other traffic leaves the machine, which is the whole security story in one sentence.
 
 ```mermaid
 flowchart TB
     User["Acme staff<br/>sales_user · support_user · admin"]
 
-    subgraph compose["docker compose up — six services, all local"]
+    subgraph compose["docker compose up - six services, all local"]
         direction TB
 
         KC["<b>keycloak</b><br/>realm imported from JSON<br/>3 roles · 3 users · JWKS"]
 
-        subgraph apisvc["<b>api</b> — FastAPI"]
+        subgraph apisvc["<b>api</b> - FastAPI"]
             direction TB
             UI["React chat UI<br/>tool chips · cost badge"]
             AUTH["Auth dependency<br/>validate JWT · cache JWKS<br/>claims to Principal"]
@@ -82,13 +81,13 @@ flowchart TB
     class PHX obs
 ```
 
-**Reading it:** orange is the trust boundary, green the agent core, blue durable and ephemeral state, purple observability, grey anything outside the machine. Dotted lines are supporting traffic — telemetry, cache reads, key fetches. The thick line to `audit_log` is deliberate: **every authorization decision is written, allow as well as deny.**
+**Reading it:** orange is the trust boundary, green the agent core, blue durable and ephemeral state, purple observability, grey anything outside the machine. Dotted lines are supporting traffic - telemetry, cache reads, key fetches. The thick line to `audit_log` is deliberate: **every authorization decision is written, allow as well as deny.**
 
-Three things a panel will look for: tool schemas live in `mcp-server` and reach the agent only at runtime (§4.2's separation of concerns); nothing touches Postgres except through the MCP server; and the data plane — `postgres`, `redis`, `mcp-server` — **publishes no host ports**, so it is reachable only on the internal Compose network.
+Three things a panel will look for: tool schemas live in `mcp-server` and reach the agent only at runtime (§4.2's separation of concerns); nothing touches Postgres except through the MCP server; and the data plane - `postgres`, `redis`, `mcp-server` - **publishes no host ports**, so it is reachable only on the internal Compose network.
 
 ---
 
-## 2. Request lifecycle — grounded read with parallel tools
+## 2. Request lifecycle - grounded read with parallel tools
 
 The happy path. Note the two read tools running concurrently, and that Redis is consulted before Postgres.
 
@@ -143,11 +142,11 @@ sequenceDiagram
     Note over AG: one Phoenix trace spans the whole turn
 ```
 
-Returning the `trace_id` to the caller is a small touch that pays off in the demo — paste it into Phoenix and the waterfall for that exact request comes up.
+Returning the `trace_id` to the caller is a small touch that pays off in the demo - paste it into Phoenix and the waterfall for that exact request comes up.
 
 ---
 
-## 3. Tool authorization — three gates, fail closed
+## 3. Tool authorization - three gates, fail closed
 
 This is the §4.4 answer, and the diagram to have open during Q&A. The critical edge is the dashed one at the bottom: **a denial is fed back to the model as an error tool result, so the agent explains the refusal instead of the API throwing.**
 
@@ -156,10 +155,10 @@ flowchart TB
     START(["Model emits tool_call"]) --> KNOWN{"Tool in<br/>registry?"}
     KNOWN -->|"no"| ERR["Unknown tool"]
 
-    KNOWN -->|"yes"| G1["<b>Gate 1 — validate</b><br/>Pydantic schema<br/>argument coercion"]
+    KNOWN -->|"yes"| G1["<b>Gate 1 - validate</b><br/>Pydantic schema<br/>argument coercion"]
     G1 -->|"invalid"| ERR
 
-    G1 --> G2["<b>Gate 2 — authorize</b><br/>required_role vs Principal roles"]
+    G1 --> G2["<b>Gate 2 - authorize</b><br/>required_role vs Principal roles"]
 
     G2 --> DEF{"Access level<br/>declared?"}
     DEF -->|"not declared"| FAIL["<b>Fail closed</b><br/>treat as destructive write<br/>require admin"]
@@ -169,7 +168,7 @@ flowchart TB
     CHECK -->|"no"| DENY["Decision: deny<br/>reason = insufficient_role"]
     CHECK -->|"yes"| ALLOW["Decision: allow"]
 
-    ALLOW --> G3["<b>Gate 3 — call</b><br/>dispatch through MCP client"]
+    ALLOW --> G3["<b>Gate 3 - call</b><br/>dispatch through MCP client"]
     G3 --> RESULT["Tool result<br/>capped at max_result_chars"]
 
     DENY ==> AUDIT[("audit_log")]
@@ -196,7 +195,7 @@ Worth saying out loud in the walkthrough: RBAC is enforced **here**, at dispatch
 
 ### The role ladder, one table
 
-The four §4.1 tools alone cannot distinguish `support_user` from `sales_user` — §4.4 gives support **read and update** access to issues, so the registry adds `add_issue_update`. Every cell below is an eval case:
+The four §4.1 tools alone cannot distinguish `support_user` from `sales_user` - §4.4 gives support **read and update** access to issues, so the registry adds `add_issue_update`. Every cell below is an eval case:
 
 | Tool                              | Access              | sales_user     | support_user   | admin             |
 | --------------------------------- | ------------------- | -------------- | -------------- | ----------------- |
@@ -206,7 +205,7 @@ The four §4.1 tools alone cannot distinguish `support_user` from `sales_user` �
 | `add_issue_update`              | write: issues       | **deny** | allow          | allow             |
 | `create_next_action`            | write: next actions | **deny** | **deny** | allow             |
 | `update_next_action`            | write: next actions | **deny** | **deny** | allow             |
-| Escalation Skill — persist stage | write: next actions | summary only   | summary only   | summary + persist |
+| Escalation Skill - persist stage | write: next actions | summary only   | summary only   | summary + persist |
 
 ### What that looks like to the user
 
@@ -230,7 +229,7 @@ sequenceDiagram
 
     AG->>AI: tool_result is_error=true<br/>"requires admin role"
     AI-->>AG: natural-language explanation
-    AG-->>U: HTTP 200 — "You have read-only access.<br/>Ask an admin to create this action."
+    AG-->>U: HTTP 200 - "You have read-only access.<br/>Ask an admin to create this action."
 
     Note over U,PG: no crash, no stack trace,<br/>and a queryable audit row
 ```
@@ -249,22 +248,22 @@ flowchart LR
 
     LOAD --> GATHER
 
-    subgraph GATHER["<b>1 — gather</b> · deterministic, no LLM"]
+    subgraph GATHER["<b>1 - gather</b> · deterministic, no LLM"]
         direction TB
         T1["get_customer_profile"]
         T2["get_open_issues"]
         T3["summarise_issue_history"]
     end
 
-    GATHER --> REASON["<b>2 — reason</b><br/>single structured-output call"]
-    REASON --> VALID{"<b>3 — validate</b><br/>schema conforms?"}
+    GATHER --> REASON["<b>2 - reason</b><br/>single structured-output call"]
+    REASON --> VALID{"<b>3 - validate</b><br/>schema conforms?"}
 
     VALID -->|"no"| RETRY["One repair attempt"]
     RETRY --> VALID
 
     VALID -->|"yes"| OUT["<b>Output</b><br/>executive_summary<br/>risk_level enum<br/>recommended_next_action<br/>missing_information[]"]
 
-    OUT --> PERSIST{"<b>4 — persist</b><br/>caller is admin?"}
+    OUT --> PERSIST{"<b>4 - persist</b><br/>caller is admin?"}
     PERSIST -->|"yes"| WRITE[("next_actions<br/>+ audit_log")]
     PERSIST -->|"no"| RETURN(["Return summary only"])
     WRITE --> RETURN
@@ -278,7 +277,7 @@ flowchart LR
     class WRITE store
 ```
 
-Stage 1 is deterministic and therefore unit-testable with the tools stubbed. Stage 4 reuses the same registry gate as any other write — the Skill gets no privilege the caller doesn't have, which is a question worth pre-empting.
+Stage 1 is deterministic and therefore unit-testable with the tools stubbed. Stage 4 reuses the same registry gate as any other write - the Skill gets no privilege the caller doesn't have, which is a question worth pre-empting.
 
 ---
 
@@ -291,22 +290,22 @@ Stage 1 is deterministic and therefore unit-testable with the tools stubbed. Sta
 | §4.3 Skill                | `skills/customer_escalation_summary/`      | Versioned, four stages, schema-validated                                                                      |
 | §4.4 Keycloak + RBAC      | `keycloak`, auth dependency, tool registry | Realm as committed JSON; enforcement at dispatch                                                              |
 | §4.5 Compose              | `docker-compose.yml`                       | Six services, health checks, one command                                                                      |
-| §4.6 Postgres             | `postgres`                                 | Six tables — the five required plus`audit_log`                                                             |
+| §4.6 Postgres             | `postgres`                                 | Six tables - the five required plus`audit_log`                                                             |
 | §4.7 Redis                | `redis`                                    | Session memory and lookup cache, distinct jobs                                                                |
 | §4.8 Eval + observability | `phoenix`, OTel spans, `make eval`       | Trace-derived tool assertions, not self-reported                                                              |
 
-## Security posture — five sentences for Q&A
+## Security posture - five sentences for Q&A
 
 1. **Identity**: Keycloak via OIDC auth-code + PKCE on the chat page, or a plain bearer token on the API; JWTs verified against JWKS on every request, nothing session-side to steal.
-2. **Authorization**: enforced at tool dispatch with fail-closed defaults — an unannotated tool requires `admin`, and no prompt wording reaches past Gate 2.
+2. **Authorization**: enforced at tool dispatch with fail-closed defaults - an unannotated tool requires `admin`, and no prompt wording reaches past Gate 2.
 3. **Blast radius**: the data plane publishes no host ports, the OpenAI call is the only egress, and SQL is parameterised and issued only by the MCP server.
-4. **Injected content is contained**: issue text is user-generated and enters the model's context, so the seed data includes a live prompt-injection attempt — the eval proves the agent can be *persuaded* but not *authorized*; the write is denied and the attempt lands in `audit_log`.
-5. **Everything is auditable**: every allow and deny is a queryable row — actor, role, tool, args, decision, reason.
+4. **Injected content is contained**: issue text is user-generated and enters the model's context, so the seed data includes a live prompt-injection attempt - the eval proves the agent can be *persuaded* but not *authorized*; the write is denied and the attempt lands in `audit_log`.
+5. **Everything is auditable**: every allow and deny is a queryable row - actor, role, tool, args, decision, reason.
 
 ## Trade-offs visible in these diagrams
 
 - **MCP over Streamable HTTP, not stdio.** The server is a separate container, so stdio would couple the processes; Streamable HTTP is the current MCP remote transport (the older HTTP+SSE transport is deprecated). Costs a network hop, buys genuine deployability.
 - **All Postgres access via MCP.** The API never opens its own connection to business tables. One chokepoint to audit; slightly more indirection.
 - **`audit_log` is not in the brief.** §3.1 asks for an auditable experience and §4.6 never requires the table. A few hours, and it answers most enterprise-readiness questions on its own.
-- **A polished React UI, though the brief doesn't ask for one.** §3.2 permits "a simple UI or API" — but the panel watches the UI for 15 minutes, and an FDE's craft shows there. It stays a static build served by FastAPI (no extra runtime container), and it exists to make the architecture visible: tool-call chips with allow/deny badges, per-turn cost and latency, a trace link into Phoenix.
+- **A polished React UI, though the brief doesn't ask for one.** §3.2 permits "a simple UI or API" - but the panel watches the UI for 15 minutes, and an FDE's craft shows there. It stays a static build served by FastAPI (no extra runtime container), and it exists to make the architecture visible: tool-call chips with allow/deny badges, per-turn cost and latency, a trace link into Phoenix.
 - **Redis is not the source of truth.** It holds conversation state and cached reads only; anything a next action depends on is re-read from Postgres before a write.
