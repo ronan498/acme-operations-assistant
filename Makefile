@@ -11,6 +11,13 @@ db-hide: ## remove the published port again (back to internal-only)
 	docker compose up -d postgres
 	@echo "postgres is internal-only again"
 
+db-gui: ## browser DB GUI (Adminer) at http://localhost:8081, joined to the compose network
+	docker run -d --rm --name acme-adminer --network acme-assistant_default -p 127.0.0.1:8081:8080 adminer:latest >/dev/null
+	@echo "open http://localhost:8081 · System: PostgreSQL · Server: postgres · User: acme · Password: acme_dev_password · Database: acme"
+
+db-gui-stop: ## stop the browser DB GUI
+	docker stop acme-adminer >/dev/null && echo "adminer stopped"
+
 up: ## build and start all six services
 	docker compose up -d --build
 
